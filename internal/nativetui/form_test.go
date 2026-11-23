@@ -83,7 +83,7 @@ func TestFormOpensInNormalMode(t *testing.T) {
 func TestModelSelectorDefaultsOpusAndCycles(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	m := &model{}
-	m.openNewRepoWorkgroupForm("repo", "Repo")
+	m.openAddAgentForm("root", "Root")
 
 	var modelField *formField
 	for _, f := range m.form.fields {
@@ -103,7 +103,8 @@ func TestModelSelectorDefaultsOpusAndCycles(t *testing.T) {
 
 	// Navigate from the prompt field down to the model selector with j, then
 	// cycle forward with l. opus -> sonnet.
-	m.handleForm(key("j")) // prompt -> mode
+	m.handleForm(key("j")) // prompt -> repos
+	m.handleForm(key("j")) // repos -> mode
 	m.handleForm(key("j")) // mode -> agent (Harness)
 	m.handleForm(key("j")) // agent -> model
 	if m.form.active() != modelField {
@@ -130,7 +131,6 @@ func TestFormsCarryHarnessField(t *testing.T) {
 		name string
 		open func(*model)
 	}{
-		{"new-repo-workgroup", func(m *model) { m.openNewRepoWorkgroupForm("repo", "Repo") }},
 		{"add-agent", func(m *model) { m.openAddAgentForm("root", "Root") }},
 	}
 	for _, tc := range cases {
@@ -177,9 +177,10 @@ func TestNewWorkgroupUntouchedReposAreOmitted(t *testing.T) {
 // default. Cycling back to claude restores the claude models (and default).
 func TestHarnessCyclesModelOptions(t *testing.T) {
 	m := &model{}
-	m.openNewRepoWorkgroupForm("repo", "Repo")
+	m.openAddAgentForm("root", "Root")
 
-	// prompt -> mode -> agent (Harness), then cycle claude -> codex.
+	// prompt -> repos -> mode -> agent (Harness), then cycle claude -> codex.
+	m.handleForm(key("j"))
 	m.handleForm(key("j"))
 	m.handleForm(key("j"))
 	if m.form.active() != m.form.field("agent") {
@@ -209,7 +210,7 @@ func TestHarnessCyclesModelOptions(t *testing.T) {
 // action fields the daemon consumes.
 func TestAgentFormSubmitsHarnessAndModel(t *testing.T) {
 	m := &model{}
-	m.openNewRepoWorkgroupForm("repo", "Repo")
+	m.openAddAgentForm("root", "Root")
 	v := m.form.values()
 	if got := v["agent"]; got != agent.DefaultKind() {
 		t.Fatalf("agent field: got %q, want claude", got)
@@ -271,7 +272,7 @@ func TestWorkgroupCoordinatorControls(t *testing.T) {
 	if len(fs.fields) != 5 {
 		t.Fatalf("creation has %d controls, want five", len(fs.fields))
 	}
-	if !strings.Contains(m.renderForm(), "Repos (optional") {
+	if !strings.Contains(m.renderForm(), "Repo limit (optional") {
 		t.Fatal("repositories must be visibly optional")
 	}
 	harness, model := fs.field(wsops.FieldCoordinator), fs.field(wsops.FieldCoordinatorModel)
@@ -300,6 +301,18 @@ func TestWorkgroupCoordinatorControls(t *testing.T) {
 	fs.field("repos").value = "api,web"
 	if got := formFieldsForSubmit(fs)["repos"]; got != "api,web" {
 		t.Fatalf("selected repos = %q", got)
+	}
+	// Picked repos only limit the workgroup: the prompt goes to the coordinator
+	// and no member is seeded (create-workspace without defaultAgent, never
+	// new-workgroup, which would start an idle first agent on those repos).
+	if fs.action != core.ActionCreateWorkspace {
+		t.Fatalf("creation action = %q, want %q", fs.action, core.ActionCreateWorkspace)
+	}
+	if v, ok := formFieldsForSubmit(fs)["defaultAgent"]; ok {
+		t.Fatalf("creation must not seed a member, defaultAgent = %q", v)
+	}
+	if fs.fields[0].key != "prompt" {
+		t.Fatalf("the prompt must be the first field, got %q", fs.fields[0].key)
 	}
 	fs.field("repos").value = "  "
 	if _, ok := formFieldsForSubmit(fs)["repos"]; ok {
@@ -368,7 +381,7 @@ func TestWorkgroupFormReadableAtOrdinaryWidths(t *testing.T) {
 			for _, field := range m.form.fields {
 				m.form.cursor = slices.Index(m.form.fields, field)
 				out := plain(m.renderForm())
-				for _, want := range []string{"Coordinator harness:", "Coordinator model:", "Repos (optional):", kind, agent.HarnessFor(kind).DefaultModel(), "Create workgroup"} {
+				for _, want := range []string{"Coordinator harness:", "Coordinator model:", "Repo limit (optional):", kind, agent.HarnessFor(kind).DefaultModel(), "Create workgroup"} {
 					if !strings.Contains(out, want) {
 						t.Fatalf("width %d, active %s: missing %q:\n%s", width, field.key, want, out)
 					}

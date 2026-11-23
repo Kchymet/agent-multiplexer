@@ -555,11 +555,14 @@ func TestInputSequenceSeparatesWritesAndPreservesOrder(t *testing.T) {
 func TestInputSequenceNotBeforeAgeMeasuresFromStart(t *testing.T) {
 	eng := New()
 	defer eng.Shutdown()
+	// The engine measures age from the process start, which happens inside
+	// Ensure; taking started before Ensure makes it a true lower bound (taken
+	// after, it trails the process start and the assertion flakes by a few ms).
+	started := time.Now()
 	inst, err := eng.Ensure(context.Background(), engine.Spec{Key: engine.Key{AgentID: "boot"}, Argv: []string{"sh", "-c", "stty raw -echo; printf READY; cat"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	started := time.Now()
 	c := &collector{}
 	inst.Subscribe(c.sink())
 	const hold = 600 * time.Millisecond

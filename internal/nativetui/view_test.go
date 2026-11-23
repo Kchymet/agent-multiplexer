@@ -45,11 +45,13 @@ func TestAddAgentKeyOnWorkgroup(t *testing.T) {
 	}
 }
 
-// `a` on a repo header creates a normal workgroup with an explicit repo grant.
+// `a` on a repo header creates a normal workgroup with an explicit repo grant,
+// prompted directly (no member is seeded: create-workspace, no defaultAgent).
 func TestAddAgentKeyOnRepo(t *testing.T) {
 	m := &model{sessions: []core.Session{{ID: "acme/api", Title: "acme/api", Kind: "repo", Section: core.SectionRepos}}}
 	m.handleKey(key("a"))
-	if m.form == nil || m.form.action != "new-workgroup" || m.form.id != "" || m.form.values()["repos"] != "acme/api" {
+	if m.form == nil || m.form.action != core.ActionCreateWorkspace || m.form.id != "" || m.form.values()["repos"] != "acme/api" ||
+		m.form.field("agent") != nil || formFieldsForSubmit(m.form)["defaultAgent"] != "" {
 		t.Fatalf("repo workgroup form not opened correctly: %+v", m.form)
 	}
 }

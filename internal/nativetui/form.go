@@ -16,26 +16,15 @@ import (
 	"amux/internal/wsops"
 )
 
-// openNewRepoWorkgroupForm opens the new-workgroup form for a repo header: a
-// normal workgroup whose repos are seeded with (and so limited to) that one
-// repo, with its first agent on it. There is no one-off agent on a repo.
+// openNewRepoWorkgroupForm opens the new-workgroup form for a repo header: the
+// same direct-prompt form as openNewWorkgroupForm, with its repo limit seeded
+// with (and so the workgroup limited to) that one repo. There is no one-off
+// agent on a repo: the coordinator starts whatever agents the prompt needs.
 func (m *model) openNewRepoWorkgroupForm(repoID, repoTitle string) {
-	m.form = &formState{
-		explicitRepos: true,
-		title:         "New workgroup · " + repoTitle,
-		action:        core.ActionNewWorkgroup,
-		submit:        "Create workgroup",
-		fields: []*formField{
-			{key: "prompt", label: "Prompt"},
-			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeInteractive}},
-			harnessField(),
-			modelField(agent.DefaultKind()),
-			{key: wsops.FieldCoordinator, label: "Coordinator harness", value: agent.GoalRuntime, options: agent.Kinds()},
-			coordinatorModelField(agent.GoalRuntime),
-			{key: "repos", label: "Repos", value: repoID, picker: true},
-			{key: "name", label: "Name"},
-		},
-	}
+	m.openNewWorkgroupForm()
+	m.form.title = "New workgroup · " + repoTitle
+	m.form.explicitRepos = true
+	m.form.field("repos").value = repoID
 }
 
 // openAddAgentForm opens the settings form for an additional agent on an
@@ -71,19 +60,24 @@ func (m *model) openAddRepoForm() {
 	}
 }
 
-// openNewWorkgroupForm opens the settings form for a new workgroup (the repos
-// picked limit it and seed a first agent; none = coordinator only).
+// openNewWorkgroupForm opens the form for a new workgroup. The prompt goes
+// straight to the coordinator as its task, and the coordinator decides which
+// member agents to start: the form never creates a member itself. Repos, when
+// picked, only limit which repositories the workgroup may use (none = every
+// tracked repo). It submits create-workspace without defaultAgent — the
+// daemon's coordinator-plus-repo-limit creation — because new-workgroup would
+// also seed an idle first member from the picked repos.
 func (m *model) openNewWorkgroupForm() {
 	m.form = &formState{
 		title:  "New workgroup",
-		action: core.ActionNewWorkgroup,
+		action: core.ActionCreateWorkspace,
 		submit: "Create workgroup",
 		fields: []*formField{
+			{key: "prompt", label: "Prompt (to coordinator)"},
 			{key: "name", label: "Name"},
-			{key: "prompt", label: "Prompt"},
 			{key: wsops.FieldCoordinator, label: "Coordinator harness", value: agent.GoalRuntime, options: agent.Kinds()},
 			coordinatorModelField(agent.GoalRuntime),
-			{key: "repos", label: "Repos (optional)", picker: true},
+			{key: "repos", label: "Repo limit (optional)", picker: true},
 		},
 	}
 }
@@ -858,14 +852,19 @@ func formFieldsForSubmit(fs *formState) map[string]string {
 	for k, v := range fs.extra {
 		fields[k] = v
 	}
-	if fs.action == core.ActionNewWorkgroup && fields["repos"] == "" && !fs.explicitRepos {
-		// An untouched first-agent picker means "create an empty but immediately
-		// usable coordinator", not an explicitly empty authorization ceiling.
+	if isWorkgroupCreation(fs.action) && fields["repos"] == "" && !fs.explicitRepos {
+		// An untouched repo-limit picker means "no limit", not an explicitly
+		// empty authorization ceiling.
 		// Omission lets wsops initialize all currently tracked repositories; the
 		// dedicated host grants action is how an operator deliberately seals it.
 		delete(fields, "repos")
 	}
 	return fields
+}
+
+// isWorkgroupCreation reports whether a form action creates a workgroup root.
+func isWorkgroupCreation(action string) bool {
+	return action == core.ActionNewWorkgroup || action == core.ActionCreateWorkspace
 }
 
 // minValueCells is the narrowest a text field's rows may get beside their label
@@ -902,7 +901,7 @@ func (m *model) renderForm() string {
 	if lipgloss.Width(footer[0]) > inner {
 		footer = []string{submit, m.formHint()}
 	}
-	if fs.action == core.ActionNewWorkgroup || fs.action == core.ActionAddAgent {
+	if isWorkgroupCreation(fs.action) || fs.action == core.ActionAddAgent {
 		footer = append(footer, dimStyle.Render("Account: machine default at creation (rail: s)"))
 	}
 	// In a pane too short for the modal's chrome, give up the blank spacer rows
