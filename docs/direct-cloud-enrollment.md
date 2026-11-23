@@ -55,6 +55,18 @@ cloud code TTL (5 minutes), is bound to this host (`server_id`), to the
 owner/provider pins and to the policy generation, and can never reach an
 existing grant or refresh token.
 
+**Local tickets.** `amux direct enroll --qr` (admin operation
+`enroll_ticket`) mints the same v2 ticket on the host operator's own
+authority, with no cloud request: the host's own scope flags, the manual code
+lifetime (default 10 minutes, at most 1 hour) and single use, and no cloud
+pins, ceiling, caps or policy generation. The record is a manual code marked
+as a ticket. It is claimed and redeemed exactly like a cloud ticket below,
+except that no cloud policy can void it (turning cloud enrollment off does not
+affect it). Like every ticket it is never redeemable without a claim and the
+claiming device's verifier; before the claim it carries exactly a v1 bundle's
+authority. An older direct server refuses `enroll_ticket` as unknown rather
+than minting a v1 code.
+
 **Claim rules.**
 
 | Situation | Result |
@@ -62,7 +74,7 @@ existing grant or refresh token.
 | Live unclaimed ticket, valid S256 challenge | Challenge stored and committed durably, then `200 {claimed:true, expires_at}` |
 | Same challenge again (lost answer) | `200`, nothing written |
 | A different challenge after a claim | `invalid_grant`, nothing changed |
-| Not a ticket (manual or PKCE code), consumed, expired, policy changed or disabled | `invalid_grant` |
+| Not a ticket (manual or PKCE code), consumed, expired, or (cloud tickets) policy changed or disabled | `invalid_grant` |
 | Malformed challenge or method other than `S256` | `invalid_request` |
 | Store write not confirmed | `temporarily_unavailable`; retry with the same challenge |
 
@@ -72,7 +84,8 @@ Parameters in the URL are refused.
 **Redeeming a ticket.** An unclaimed ticket at the token endpoint is
 `invalid_request` and is not consumed, with or without a `code_verifier`.
 After a claim, the cloud PKCE rules above apply unchanged: a wrong verifier
-consumes it, and a policy change since issuance refuses it.
+consumes it, and (for a cloud ticket) a policy change since issuance refuses
+it. A local ticket follows the same rules without the policy check.
 
 **Ordinary cloud codes are unchanged.** A request without `handoff` still
 requires an S256 challenge; a ticket request carrying one, or an unknown

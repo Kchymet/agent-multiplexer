@@ -13,14 +13,17 @@ require (
 )
 
 require (
+	github.com/boombuler/barcode v1.1.0
 	github.com/cli/go-gh/v2 v2.13.0
 	github.com/go-jose/go-jose/v4 v4.1.7
 	github.com/gorilla/websocket v1.5.3
+	github.com/makiuchi-d/gozxing v0.1.1
 )
 
 require (
 	github.com/cli/safeexec v1.0.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
+	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 

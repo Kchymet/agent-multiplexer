@@ -481,15 +481,21 @@ func (a *Authority) IssueCloudCode(req CloudIssueRequest) (string, int64, error)
 	return code, exp, nil
 }
 
-// checkVerifierLocked enforces PKCE and the policy generation at redemption.
-// Request errors leave the code usable; a wrong verifier or a stale policy
-// consumes it (committed best-effort; it stays consumed in this process).
+// checkVerifierLocked enforces PKCE at redemption, and the policy generation
+// for cloud codes. A device ticket (cloud or local) always needs a claim and
+// the claiming device's verifier. Request errors leave the code usable; a
+// wrong verifier or a stale policy consumes it (committed best-effort; it stays
+// consumed in this process).
 func (a *Authority) checkVerifierLocked(key string, rec *codeRecord, verifier string, now int64) error {
-	if rec.Origin != OriginCloud {
+	if rec.Origin != OriginCloud && !rec.Ticket {
 		if verifier != "" {
-			return &requestError{"code_verifier is only valid for cloud-issued codes"}
+			return &requestError{"code_verifier is only valid for cloud-issued codes and device tickets"}
 		}
 		return nil
+	}
+	if rec.Origin != OriginCloud && rec.Origin != "" {
+		// Not a shape any binary mints: refuse rather than guess its rules.
+		return errInvalidCode
 	}
 	if rec.Ticket && rec.Challenge == "" {
 		// Unclaimed: the device must bind its own challenge first. Leaves the
@@ -502,9 +508,11 @@ func (a *Authority) checkVerifierLocked(key string, rec *codeRecord, verifier st
 	if !ValidVerifier(verifier) {
 		return &requestError{"code_verifier must be 43-128 characters of [A-Za-z0-9-._~]"}
 	}
-	c := a.state.Cloud
-	ok := subtle.ConstantTimeCompare([]byte(S256Challenge(verifier)), []byte(rec.Challenge)) == 1 &&
-		c != nil && c.Enabled && c.Generation == rec.PolicyGen
+	ok := rec.Challenge != "" && subtle.ConstantTimeCompare([]byte(S256Challenge(verifier)), []byte(rec.Challenge)) == 1
+	if rec.Origin == OriginCloud {
+		c := a.state.Cloud
+		ok = ok && c != nil && c.Enabled && c.Generation == rec.PolicyGen
+	}
 	if ok {
 		return nil
 	}
@@ -562,8 +570,10 @@ func (a *Authority) pruneCloudLocked(now int64) {
 // S256 challenge, at the host, before redemption. It is the only way a
 // ticket's challenge is ever set, and it sets it exactly once:
 //
-//   - the code must be a live device ticket: cloud-issued as a ticket, not
-//     consumed, not expired, and issued under the current enabled cloud policy;
+//   - the code must be a live device ticket, not consumed and not expired:
+//     either cloud-issued as a ticket under the current enabled cloud policy,
+//     or minted locally by the host operator (NewLocalTicket), which no cloud
+//     policy governs;
 //   - an unclaimed ticket takes challenge and is committed durably before
 //     success is reported (a failed commit leaves it unclaimed);
 //   - a ticket already claimed with the SAME challenge succeeds again, so a
@@ -588,9 +598,19 @@ func (a *Authority) ClaimTicket(code, challenge, method string) (int64, error) {
 	}
 	now := a.now().Unix()
 	rec := a.state.Codes[hashToken(code)]
-	c := a.state.Cloud
-	if rec == nil || !rec.Ticket || rec.Origin != OriginCloud || rec.ConsumedAt != 0 || now >= rec.ExpiresAt ||
-		c == nil || !c.Enabled || c.Generation != rec.PolicyGen {
+	if rec == nil || !rec.Ticket || rec.ConsumedAt != 0 || now >= rec.ExpiresAt {
+		return 0, errInvalidCode
+	}
+	switch rec.Origin {
+	case OriginCloud:
+		// A cloud ticket lives only as long as the policy it was issued under.
+		if c := a.state.Cloud; c == nil || !c.Enabled || c.Generation != rec.PolicyGen {
+			return 0, errInvalidCode
+		}
+	case "":
+		// A local ticket (NewLocalTicket) was minted by the host operator
+		// directly; no cloud policy governs it.
+	default:
 		return 0, errInvalidCode
 	}
 	if rec.Challenge != "" {
