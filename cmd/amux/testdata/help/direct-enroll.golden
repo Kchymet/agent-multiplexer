@@ -29,9 +29,10 @@ flags:
                            manage   start, rename, archive, unarchive
                            create   add-agent; new workgroups (--all-sessions only)
                            accounts read machine account status (--all-sessions only)
-                         e.g. read,steer or read,steer,respond,manage
+                           execute  alias for approve (stored and shown as approve)
+                         e.g. read,steer or read,steer,execute,manage
                          Nothing implies anything else; there is no "all".
-                         (default: read)
+                         (default: read,steer,approve)
   --all-sessions         grant every ordinary session on this host (the default)
   --workgroup <root-id>  (repeatable) grant only this workgroup and its members (not with --all-sessions)
   --ttl <dur>            code lifetime (maximum 1h) (default: 10m)
@@ -42,6 +43,8 @@ flags:
                          with a dark background); applies to --qr
   --qr-png <path>        also write the QR code as a PNG to a NEW file (mode 0600; an existing
                          file is refused); delete it after enrolling
+  --replace              once redeemed, revoke earlier clients with the same label from the same
+                         device (re-enrolling a phone without piling up duplicates)
 
 examples:
   amux direct enroll --label phone --permissions read

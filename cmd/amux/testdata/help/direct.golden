@@ -18,7 +18,7 @@ commands:
   logs [-n lines]       the managed listener's log
   serve [flags]         run the direct server in the foreground (manual)
   enroll [flags]        mint a one-time enrollment code: a bundle to paste, or a QR code to scan
-  clients <command>     list or revoke enrolled clients
+  clients <command>     list, update or revoke enrolled clients
   audit [--client <id>] [--limit N] [--json]
                         answers, item triage and overseer steers made by direct clients (newest last)
   reset-identity --yes  replace the server identity; revokes every client and disables cloud enrollment

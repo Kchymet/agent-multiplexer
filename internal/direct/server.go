@@ -390,7 +390,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 			n.refuse(w, http.StatusBadRequest, OAuthInvalidRequest, "code is required", "")
 			return
 		}
-		resp, err = s.cfg.Authority.Redeem(code, vals.Get("client_label"), vals.Get("client_kind"), vals.Get("code_verifier"))
+		resp, err = s.cfg.Authority.RedeemDevice(code, vals.Get("client_label"), vals.Get("client_kind"), vals.Get("code_verifier"), vals.Get("device_id"))
 	case GrantTypeRefresh:
 		rt := vals.Get("refresh_token")
 		if rt == "" {
@@ -522,6 +522,8 @@ func (s *Server) writeBackendErr(w http.ResponseWriter, l *Lease, err error) {
 	switch {
 	case l.Revoked():
 		writeErr(w, http.StatusUnauthorized, CodeAuthRevoked, "access revoked")
+	case l.GrantChanged():
+		writeErr(w, http.StatusUnauthorized, CodeGrantChanged, "this client's access changed; retry under the new grant")
 	case l.Expired():
 		writeErr(w, http.StatusUnauthorized, CodeAuthExpired, "access token expired")
 	case errors.Is(err, errNotFound):
@@ -1105,6 +1107,7 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.queueBackend(); ok {
 		resp.Queue, resp.Overseer = queueCaps(l.Grant)
 	}
+	resp.Grant = s.cfg.Authority.grantInfo(l)
 	if s.cfg.Wake != nil {
 		st := s.cfg.Wake.Status()
 		resp.Wake.Enabled, resp.Wake.Degraded = st.Enabled, st.Degraded

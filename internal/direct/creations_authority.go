@@ -117,8 +117,13 @@ func (a *Authority) GrantLive(l *Lease, perm string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed || l.rctx.Err() != nil {
-		if errors.Is(context.Cause(l.rctx), errGrantEnded) {
+		switch cause := context.Cause(l.rctx); {
+		case errors.Is(cause, errGrantEnded):
 			return errAuthExpired
+		case errors.Is(cause, errGrantChanged):
+			// The host narrowed the grant (grant_update.go): the right is
+			// gone, the credential is not.
+			return errDenied
 		}
 		return errAuthRevoked
 	}
@@ -154,7 +159,7 @@ func (a *Authority) Hold(l *Lease, perm string) (*Lease, error) {
 	rctx, dcancel := context.WithDeadlineCause(base, time.Now().Add(time.Unix(g.AbsoluteExpiry, 0).Sub(a.now())), errGrantEnded)
 	h := &Lease{
 		Grant:     Grant{ClientID: g.ClientID, Perms: slices.Clone(g.Perms), Resource: g.Resource},
-		ExpiresAt: g.AbsoluteExpiry, ctx: rctx, rctx: rctx, rcancel: rcancel, done: make(chan struct{}), a: a,
+		ExpiresAt: g.AbsoluteExpiry, perm: perm, ctx: rctx, rctx: rctx, rcancel: rcancel, done: make(chan struct{}), a: a,
 		release: dcancel,
 	}
 	if a.leases[g.ClientID] == nil {

@@ -10,6 +10,8 @@
 package direct
 
 import (
+	"strings"
+
 	harnessproto "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -97,6 +99,35 @@ const (
 // Permissions is the canonical order permission lists are normalized to.
 var Permissions = []string{PermRead, PermSteer, PermRespond, PermApprove, PermManage, PermCreate, PermAccounts}
 
+// PermExecute is a named alias, never a stored permission: wherever a
+// permission list is parsed it expands to PermAliases[PermExecute] (approve:
+// answering an agent's permission requests to execute something). Grants,
+// policies and every display carry the concrete names only.
+const PermExecute = "execute"
+
+// PermAliases maps each alias to the concrete permissions it stands for.
+var PermAliases = map[string][]string{PermExecute: {PermApprove}}
+
+// DefaultPermissions is what an enrollment grants when none are named (amux
+// direct enroll) and the default host cloud ceiling: read, steer and the
+// execute set. manage, create and accounts are always opt-in.
+var DefaultPermissions = []string{PermRead, PermSteer, PermApprove}
+
+// ExpandPermAliases replaces each alias in perms by its concrete permissions
+// (trimmed; other names are kept as they are, for ValidatePerms to judge).
+func ExpandPermAliases(perms []string) []string {
+	out := make([]string, 0, len(perms))
+	for _, p := range perms {
+		p = strings.TrimSpace(p)
+		if exp, ok := PermAliases[p]; ok {
+			out = append(out, exp...)
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 // Resource scope kinds. There is no implicit default: enrollment names one.
 const (
 	ResourceAllSessions = "all_sessions"
@@ -146,9 +177,17 @@ var VerbPermissions = map[string]string{
 
 // Resource API error codes (JSON body {"code","error"}).
 const (
-	CodeAuthInvalid      = "auth.invalid"
-	CodeAuthExpired      = "auth.expired"
-	CodeAuthRevoked      = "auth.revoked"
+	CodeAuthInvalid = "auth.invalid"
+	CodeAuthExpired = "auth.expired"
+	CodeAuthRevoked = "auth.revoked"
+	// CodeGrantChanged ends a stream or an in-flight request whose grant the
+	// host narrowed (amux direct clients update). The credential is still
+	// good: renew if needed, re-read capabilities and reconnect; a request
+	// the new grant no longer allows then answers denied. Older clients treat
+	// an unknown stream auth code as auth.expired (renew and reattach), which
+	// is the right recovery too. The queue watch WebSocket closes 4002 with
+	// this reason.
+	CodeGrantChanged     = "auth.grant_changed"
 	CodeDenied           = "denied"
 	CodeNotFound         = "not_found"
 	CodeBadRequest       = "bad_request"
@@ -518,6 +557,28 @@ type CapabilitiesResponse struct {
 	// this grant (queue.go). Absent: the server predates them.
 	Queue    *QueueCapabilities    `json:"queue,omitempty"`
 	Overseer *OverseerCapabilities `json:"overseer,omitempty"`
+	// Grant is this client's own effective grant ("this device can: …"):
+	// Permissions and ResourceScope above are the same values, kept for
+	// older clients. Absent: the server predates grant updates in place, and
+	// a client shows Permissions/ResourceScope alone.
+	Grant *GrantInfo `json:"grant,omitempty"`
+}
+
+// GrantInfo is a client's view of its own grant (CapabilitiesResponse.Grant).
+// The grant may change in place (amux direct clients update): narrowing ends
+// the client's open streams with auth.grant_changed, widening applies to its
+// next request. UpdatedAt is the latest change (0: never changed since
+// enrollment); a client re-reads capabilities after a grant_changed end or a
+// token refresh to show the current grant.
+type GrantInfo struct {
+	ClientID      string        `json:"client_id"`
+	Label         string        `json:"label"`
+	Permissions   []string      `json:"permissions"`
+	ResourceScope ResourceScope `json:"resource_scope"`
+	CreatedAt     int64         `json:"created_at"`
+	UpdatedAt     int64         `json:"updated_at,omitempty"`
+	ExpiresAt     int64         `json:"expires_at"`
+	Origin        string        `json:"origin,omitempty"`
 }
 
 // CreationCatalog is the allowlisted, machine-appropriate input space for the
