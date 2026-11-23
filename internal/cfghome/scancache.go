@@ -24,9 +24,13 @@ import (
 //
 // Lock order, outermost first: templateMu → one agent's lock → leaf locks
 // (hashMu, a ScanCache's map, summaryMu). summaryMu is never held across a
-// scan. Scan and Seed read the template, so they share templateMu; Promote and
-// Reset write it, so they hold it exclusively — a writer never interleaves with
-// a scan that might advance some agent's baseline from a half-written template.
+// scan. Scan and Seed read the template, so they share templateMu. Promote
+// writes the template, so it holds templateMu exclusively — it never
+// interleaves with a scan that might advance some agent's baseline from a
+// half-written template. Reset only reads the template (it rewrites the
+// agent's copy and manifest), but takes the same exclusive lock so the two
+// user verbs stay serialized with each other and with scans, as they were
+// under the old global mutex.
 // Everything that reads-modifies-writes one agent's manifest or stat sidecar
 // holds that agent's lock, so scans of different agents run in parallel.
 //

@@ -692,7 +692,9 @@ func Reset(sp Spec, rel string) error {
 	if !covered(sp, rel) {
 		return fmt.Errorf("%s is not a templated %s config path", rel, sp.Kind)
 	}
-	templateMu.Lock() // as Promote: one writer at a time, never beside a scan
+	// Reset reads the template and writes the copy; it takes the exclusive
+	// lock anyway so it is serialized with Promote and scans (see Lock order).
+	templateMu.Lock()
 	defer templateMu.Unlock()
 	defer lockAgent(sp)()
 	d, err := openDestination(sp)
