@@ -99,6 +99,19 @@ func TestKickRetriesDeferredWake(t *testing.T) {
 	h.noCall(t, 50*time.Millisecond) // nothing left to offer
 }
 
+// Queued steers are separate messages: two different ones to the same session
+// both stay queued, in order, and only an identical resend collapses.
+func TestNotifyKeepsEachQueuedSteer(t *testing.T) {
+	h := newNotifyHarness(t, 50*time.Millisecond)
+	h.w.Notify(Wake{Kind: KindSteer, SessionID: "a1", Workgroup: "steer:a1", State: "interject", Text: "first"})
+	h.w.Notify(Wake{Kind: KindSteer, SessionID: "a1", Workgroup: "steer:a1", State: "interject", Text: "second"})
+	h.w.Notify(Wake{Kind: KindSteer, SessionID: "a1", Workgroup: "steer:a1", State: "interject", Text: "first"})
+	got := h.waitCall(t)
+	if len(got) != 2 || got[0].Text != "first" || got[1].Text != "second" {
+		t.Fatalf("batch = %+v, want first then second", got)
+	}
+}
+
 // Notify ignores a wake with no route.
 func TestNotifyIgnoresUnroutedWake(t *testing.T) {
 	h := newNotifyHarness(t, 10*time.Millisecond)

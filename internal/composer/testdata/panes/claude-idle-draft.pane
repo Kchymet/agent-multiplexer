@@ -1,0 +1,18 @@
+# runtime: claude
+# size: 100x30
+# provenance: RECONSTRUCTED from the real 2.1.263 CI screen (see README).
+# shows: idle, a person's unsent two-line draft in the composer
+# want-state: draft
+# want-busy: false
+# want-text: "...Ideally we can support status and polling on those\nand webhooks later"
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H\x1b[48;5;237m❯ check the build\x1b[0m
+
+⏺ Done. The tests pass.
+
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[38;5;244m❯\x1b[0m ...Ideally we can support status and polling on those
+  and webhooks later\x1b[7m \x1b[0m
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[2m  ⏵⏵ auto mode on (shift+tab to cycle)\x1b[0m

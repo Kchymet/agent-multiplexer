@@ -1,0 +1,19 @@
+# runtime: claude
+# size: 100x30
+# provenance: RECONSTRUCTED (see README): Claude Code shows a long multi-line
+#   paste as a collapsed token in the
+#   input box instead of the words.
+# shows: idle, a person pasted a long text (collapsed token): their draft
+# want-state: draft
+# want-busy: false
+# want-text: "[Pasted text #1 +12 lines]"
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H\x1b[48;5;237m❯ check the build\x1b[0m
+
+⏺ Done. The tests pass.
+
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[38;5;244m❯\x1b[0m [Pasted text #1 +12 lines]\x1b[7m \x1b[0m
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[2m  ⏵⏵ auto mode on (shift+tab to cycle)\x1b[0m

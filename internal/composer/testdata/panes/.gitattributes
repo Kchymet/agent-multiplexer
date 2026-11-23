@@ -1,0 +1,2 @@
+# Raw fixtures are byte-exact terminal streams: never normalize line endings.
+*.pane -text

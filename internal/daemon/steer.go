@@ -211,10 +211,12 @@ func (d *Daemon) steerPTY(ctx context.Context, a core.Action, verb string, h age
 			// finds a runtime launched milliseconds ago, and a Claude Code that is
 			// still painting drops the submit key; typed text is held until the
 			// runtime is as old as the cold-start settle.
-			return d.deliverTyped(ctx, typedRequest{
+			// A person's steer the agent cannot take now is queued for
+			// automatic delivery (steer_queue.go).
+			return d.queueSteer(a, verb, d.deliverTyped(ctx, typedRequest{
 				harness: h, session: sess, instance: in, keys: keys, payload: payload,
 				text: a.Fields[core.SteerText], automated: a.Fields[steerOriginField] == steerOriginAmux,
-			})
+			}))
 		}
 		in.InputSequence(payload)
 		return nil
