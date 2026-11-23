@@ -93,6 +93,11 @@ func TestPolicyRoleMatrix(t *testing.T) {
 		{"repo same-name workgroup denied", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "b1"}, false},
 		{"console normalized runtime", Principal{Kind: SubjectSession, SubjectID: "console"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "b1"}, true},
 		{"normalized runtime needs id", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents}, false},
+		{"agent waits on itself", Principal{Kind: SubjectSession, SubjectID: "a1"}, Request{Route: RouteQuery, Verb: core.QueryWait, ID: "a1"}, true},
+		{"agent cannot wait on a sibling", Principal{Kind: SubjectSession, SubjectID: "a1"}, Request{Route: RouteQuery, Verb: core.QueryWait, ID: "a2"}, false},
+		{"coordinator waits on its member", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryWait, ID: "a2"}, true},
+		{"coordinator cannot wait on a foreign session", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryWait, ID: "b1"}, false},
+		{"wait needs id", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryWait}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

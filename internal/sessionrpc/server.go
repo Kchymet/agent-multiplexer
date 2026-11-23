@@ -38,6 +38,13 @@ type ServerOptions struct {
 	// order by ServeOnce itself and never waits for a slow one. It sees the
 	// call before authentication and may only choose a lane.
 	Slow func(Call) bool
+	// Parallel, if set, reports whether a call blocks by design — a long-poll
+	// that waits for an event — and so must not hold either lane. Each runs on
+	// its own goroutine, at most MaxParallelRequests at a time per mailbox,
+	// with a context that Close cancels; further ones stay claimed until a slot
+	// frees. It is consulted before Slow, sees the call before authentication,
+	// and may only choose a lane.
+	Parallel func(Call) bool
 	// SlowRequest, if set, receives the timing of every request that took at
 	// least SlowRequestThreshold from the start of its processing to its
 	// response, or that waited that long before its processing began (its Age),
@@ -109,6 +116,10 @@ func (t *requestTimer) phase(d *time.Duration, mark *time.Time) {
 // slow requests stay claimed until the lane has room.
 const MaxSlowRequests = 8
 
+// MaxParallelRequests bounds one mailbox's concurrently dispatched
+// parallel-lane requests (ServerOptions.Parallel).
+const MaxParallelRequests = 4
+
 type slowJob struct {
 	ctx  context.Context
 	name string
@@ -177,6 +188,14 @@ type Server struct {
 	slowStop  chan struct{}
 	slowDone  chan struct{}
 	publishMu sync.Mutex
+
+	// parallel-lane state; parallelInflight is guarded by mu. parallelCtx is
+	// cancelled by Close, which then joins parallelWG.
+	parallel         func(Call) bool
+	parallelInflight map[string]struct{}
+	parallelCtx      context.Context
+	parallelCancel   context.CancelFunc
+	parallelWG       sync.WaitGroup
 
 	serveMu sync.Mutex
 	// rejectRequests drains an over-capacity client-writable queue without ever
@@ -291,6 +310,11 @@ func OpenServerMailbox(subjectID, trustedMailboxHostDir string, authority Author
 		server.inflight = make(map[string]struct{})
 		server.slowStop, server.slowDone = make(chan struct{}), make(chan struct{})
 		go server.runSlow()
+	}
+	if options.Parallel != nil {
+		server.parallel = options.Parallel
+		server.parallelInflight = make(map[string]struct{})
+		server.parallelCtx, server.parallelCancel = context.WithCancel(context.Background())
 	}
 	if watch, err := watchDir(requests, filepath.Join(trustedMailboxHostDir, RequestsDirName), func() {
 		server.wake.notify()
@@ -527,16 +551,21 @@ func (s *Server) Run(ctx context.Context) error {
 // pass hands it nothing more, so a slot freed mid-pass cannot go to a later
 // request ahead of the one just left waiting.
 func (s *Server) processOrDefer(ctx context.Context, name string, admit bool, laneFull *bool) error {
-	if s.slow == nil {
+	if s.slow == nil && s.parallel == nil {
 		return s.processClaimed(ctx, name, admit)
 	}
 	s.mu.Lock()
 	_, owned := s.inflight[name]
+	_, ownedParallel := s.parallelInflight[name]
 	s.mu.Unlock()
-	if owned {
+	if owned || ownedParallel {
 		return nil
 	}
-	if !s.claimedSlow(name) {
+	slow, parallel := s.claimedLane(name)
+	if parallel {
+		return s.startParallel(name, admit)
+	}
+	if !slow {
 		return s.processClaimed(ctx, name, admit)
 	}
 	if !admit {
@@ -556,22 +585,57 @@ func (s *Server) processOrDefer(ctx context.Context, name string, admit bool, la
 	return nil
 }
 
-// claimedSlow peeks at a claimed request's unauthenticated call to pick its
+// claimedLane peeks at a claimed request's unauthenticated call to pick its
 // lane. Anything unreadable is processed inline, which rejects it.
-func (s *Server) claimedSlow(name string) bool {
+func (s *Server) claimedLane(name string) (slow, parallel bool) {
 	raw, err := readRegularAt(s.processing, name, maxEnvelopeFileBytes)
 	if err != nil {
-		return false
+		return false, false
 	}
 	var envelope access.SignedRequest
 	if unmarshalBounded(raw, maxEnvelopeFileBytes, &envelope) != nil {
-		return false
+		return false, false
 	}
 	var call Call
 	if unmarshalBounded(envelope.Body, access.MaxBodyBytes, &call) != nil || call.Kind != CallOperation {
-		return false
+		return false, false
 	}
-	return s.slow(cloneCall(call))
+	if s.parallel != nil && s.parallel(cloneCall(call)) {
+		return false, true
+	}
+	return s.slow != nil && s.slow(cloneCall(call)), false
+}
+
+// startParallel dispatches a claimed parallel-lane request on its own
+// goroutine. One the lane has no room for stays claimed for a later pass.
+func (s *Server) startParallel(name string, admit bool) error {
+	if !admit {
+		return ErrResponseCapacity
+	}
+	s.mu.Lock()
+	if s.closed || len(s.parallelInflight) >= MaxParallelRequests {
+		s.mu.Unlock()
+		return nil
+	}
+	s.parallelInflight[name] = struct{}{}
+	s.parallelWG.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.parallelWG.Done()
+		err := s.processClaimed(s.parallelCtx, name, true)
+		s.mu.Lock()
+		delete(s.parallelInflight, name)
+		s.mu.Unlock()
+		if errors.Is(err, ErrResponseCapacity) {
+			return // retried by the pass that next finds capacity
+		}
+		// Requests left claimed while the lane was full can now be taken.
+		s.wake.notify()
+		if s.notify != nil {
+			s.notify()
+		}
+	}()
+	return nil
 }
 
 // runSlow dispatches the slow lane in arrival order. A request whose
@@ -602,12 +666,12 @@ func (s *Server) runSlow() {
 // Busy reports whether the slow lane holds a request. Close waits for it, so a
 // caller holding a lock that dispatch may need must hand the close off.
 func (s *Server) Busy() bool {
-	if s.slow == nil {
+	if s.slow == nil && s.parallel == nil {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.inflight) != 0
+	return len(s.inflight) != 0 || len(s.parallelInflight) != 0
 }
 
 // dropExpired removes an unclaimed request that expired long enough ago that
@@ -1408,6 +1472,11 @@ func (s *Server) Close() error {
 	if s.slowStop != nil {
 		close(s.slowStop)
 		<-s.slowDone
+	}
+	// Parallel calls block by design: cancel them, then join them.
+	if s.parallelCancel != nil {
+		s.parallelCancel()
+		s.parallelWG.Wait()
 	}
 	s.mu.Lock()
 	s.settlementStopOnce.Do(func() { close(s.settlementStop) })

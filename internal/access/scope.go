@@ -85,6 +85,9 @@ var rules = map[Route]map[string]Rule{
 		core.QueryRepos:    {Scope: ScopeFiltered},
 
 		core.QueryRuntimeEvents: {Scope: ScopeWorkgroup},
+		// A long-poll on one session's rail view: the same state and PRs the
+		// caller's scoped status already shows it, for what it may read.
+		core.QueryWait: {Scope: ScopeWorkgroup},
 
 		// Raw runtime paths/records and untracked-conversation fallback are never
 		// exposed to restricted principals.

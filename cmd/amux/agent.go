@@ -54,6 +54,10 @@ func cmdAgent(args []string) error {
 		// Authenticated bounded history. The daemon derives and opens the source;
 		// this client never receives a transcript path.
 		return cmdAgentEvents(args[1:])
+	case "wait":
+		// Block on the daemon's state broadcast until a session (a member, for
+		// a coordinator) changes: the event-driven alternative to polling.
+		return cmdAgentWait(args[1:])
 	case "name", "label":
 		return cmdName(args[1:])
 	case "goal":
@@ -109,6 +113,10 @@ usage: amux agent <command>
   sessions [--json]  discover all host agent conversations (read-only)
   events [<id>]      read one bounded normalized event page through authenticated
                      session RPC (--after/--cursor, --json)
+  wait <id>...       block until a session (yours, or a member for a coordinator)
+                     changes state or PRs, then print it; no polling. --until
+                     ready,idle,waiting waits for one of those states; --timeout
+                     bounds the wait (nonzero exit); --json
 
 Commands use the private file mailbox from the ordinary sandboxed shell.
 Keep both sandboxes enabled. Discovery grants no cross-session write access.
