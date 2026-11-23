@@ -45,8 +45,9 @@ func TestHookEventStateContract(t *testing.T) {
 	want := map[string]string{
 		"SessionStart":     core.StateReady,
 		"UserPromptSubmit": core.StateRunning,
+		"PreToolUse":       core.StateWaiting, // AskUserQuestion only (matcher)
 		"PostToolUse":      core.StateRunning,
-		"Notification":     core.StateWaiting,
+		"Notification":     core.StateWaiting, // prompts only (ClassifyNotification)
 		"Stop":             core.StateReady,
 		"SessionEnd":       core.StateIdle,
 	}
@@ -68,6 +69,17 @@ func TestHookEventStateContract(t *testing.T) {
 	for _, n := range names {
 		if _, ok := want[n]; !ok {
 			t.Errorf("HookEventNames() lists unexpected event %q", n)
+		}
+	}
+	// Only the AskUserQuestion selector makes PreToolUse waiting; every other
+	// event's status hook matches everything.
+	for _, n := range names {
+		want := ""
+		if n == "PreToolUse" {
+			want = "AskUserQuestion"
+		}
+		if got := HookEventMatcher(n); got != want {
+			t.Errorf("HookEventMatcher(%q) = %q, want %q", n, got, want)
 		}
 	}
 	// An unknown event is reported as unlisted, not silently mapped.

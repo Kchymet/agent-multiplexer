@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"amux/internal/access"
 	"amux/internal/agent"
@@ -58,6 +59,14 @@ func cmdAgent(args []string) error {
 		// Block on the daemon's state broadcast until a session (a member, for
 		// a coordinator) changes: the event-driven alternative to polling.
 		return cmdAgentWait(args[1:])
+	case "raise":
+		// Upward signals: a structured follow-up / outstanding / decision /
+		// risk / fyi item to the caller's coordinator (or the global inbox).
+		return cmdAgentRaise(args[1:])
+	case "items":
+		return cmdAgentItems(args[1:])
+	case "escalate":
+		return cmdAgentEscalate(args[1:])
 	case "name", "label":
 		return cmdName(args[1:])
 	case "goal":
@@ -117,6 +126,14 @@ usage: amux agent <command>
                      changes state or PRs, then print it; no polling. --until
                      ready,idle,waiting waits for one of those states; --timeout
                      bounds the wait (nonzero exit); --json
+  raise              raise a structured item upward (a member to its coordinator,
+                     anyone else to the global inbox): --kind follow_up|outstanding|
+                     decision_needed|risk|fyi --title "…" [--detail "…"]
+                     [--pr repo#n] [--link url] [--suggest "…"] [--json]
+  items              list the items you raised or receive (--raised, --inbox,
+                     --all, --json); show <id>; ack|dismiss|done|reopen <id>...
+  escalate <id>...   coordinator: hand a received item to the global inbox
+                     [--note "…"]
 
 Commands use the private file mailbox from the ordinary sandboxed shell.
 Keep both sandboxes enabled. Discovery grants no cross-session write access.
@@ -221,12 +238,42 @@ func cmdAgentStatus(args []string, hook bool) error {
 		if err := readHookJSON(&payload); err != nil {
 			return nil
 		}
-		if payload.HookEventName == "Notification" && !claudecfg.NotificationNeedsUser(payload) {
-			return nil // the idle reminder or a login notice: the state stands
+		switch payload.HookEventName {
+		case "Notification":
+			switch claudecfg.ClassifyNotification(payload) {
+			case claudecfg.NotificationIgnored:
+				return nil // the idle reminder or another non-prompt notice: the state stands
+			case claudecfg.NotificationUnrecognized:
+				// Not read as waiting (that would claim the user is needed);
+				// logged by the daemon so a new type gets classified.
+				return hookResult(hook, reportWithin(hook, sessionreport.Notice,
+					map[string]string{sessionreport.FieldNotice: noticeOf(payload)}))
+			}
+		case "PreToolUse":
+			// Installed with an AskUserQuestion matcher; guard against a
+			// Claude that ignores matchers so ordinary tools never read waiting.
+			if payload.ToolName != claudecfg.QuestionTool {
+				return nil
+			}
 		}
 	}
 	return hookResult(hook, reportWithin(hook, sessionreport.Activity,
 		map[string]string{sessionreport.FieldState: args[0]}))
+}
+
+// noticeOf names an unrecognized Claude notification for the daemon log: its
+// type, or — for an untyped (legacy) payload — a bounded prefix of its message.
+func noticeOf(p claudecfg.HookPayload) string {
+	notice := "claude notification_type=" + strings.TrimSpace(p.NotificationType)
+	if strings.TrimSpace(p.NotificationType) == "" {
+		notice = "claude untyped notification: " + strings.TrimSpace(p.Message)
+	}
+	notice = strings.ToValidUTF8(notice, "?")
+	for len(notice) > sessionreport.MaxNoticeBytes {
+		_, size := utf8.DecodeLastRuneInString(notice)
+		notice = notice[:len(notice)-size]
+	}
+	return notice
 }
 
 // cmdAgentPermission reports the lifecycle a Claude hook claims it observed.

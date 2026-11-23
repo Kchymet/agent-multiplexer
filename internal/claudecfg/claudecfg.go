@@ -604,17 +604,42 @@ func SettingsPath() string { return User().SettingsPath() }
 // hookEvents maps each Claude Code hook event amux listens on to the activity
 // state it implies. Driven by hooks rather than by scraping the transcript or
 // pane, this is the authoritative source of an agent's status.
-var hookEvents = []struct{ event, state string }{
-	{"SessionStart", core.StateReady},       // launched, no turn yet
-	{"UserPromptSubmit", core.StateRunning}, // a turn began
+//
+// "waiting" means blocked on the user, never merely idle: it is the attention
+// chip, and a coordinator's rollup and the phone both read it as "needs you".
+var hookEvents = []struct{ event, matcher, state string }{
+	{"SessionStart", "", core.StateReady},       // launched, no turn yet
+	{"UserPromptSubmit", "", core.StateRunning}, // a turn began
+	// AskUserQuestion draws a selector in place of the composer until the user
+	// answers: blocked on the user. Claude documents PreToolUse as firing for
+	// it; PostToolUse (below) clears it once answered.
+	{"PreToolUse", QuestionTool, core.StateWaiting},
 	// A tool finished, so the turn is running again: this clears "waiting"
-	// after an approved permission prompt, and restores "running" mid-turn if
-	// the UserPromptSubmit report was lost (e.g. a member's first turn, whose
-	// hooks fire before its mailbox is served).
-	{"PostToolUse", core.StateRunning},
-	{"Notification", core.StateWaiting}, // needs the user (permission / idle prompt)
-	{"Stop", core.StateReady},           // finished the turn
-	{"SessionEnd", core.StateIdle},      // agent exited
+	// after an approved permission prompt or answered question, and restores
+	// "running" mid-turn if the UserPromptSubmit report was lost (e.g. a
+	// member's first turn, whose hooks fire before its mailbox is served).
+	{"PostToolUse", "", core.StateRunning},
+	// A prompt the user must answer. Claude also fires Notification for notices
+	// that are not prompts — above all the idle reminder a minute after every
+	// finished turn — so `amux agent hook` reports only the ones
+	// ClassifyNotification calls blocking.
+	{"Notification", "", core.StateWaiting},
+	{"Stop", "", core.StateReady},      // finished the turn
+	{"SessionEnd", "", core.StateIdle}, // agent exited
+}
+
+// QuestionTool is Claude Code's tool for asking the user a structured question.
+const QuestionTool = "AskUserQuestion"
+
+// HookEventMatcher returns the matcher amux installs its status hook for event
+// with ("" matches everything).
+func HookEventMatcher(event string) string {
+	for _, he := range hookEvents {
+		if he.event == event {
+			return he.matcher
+		}
+	}
+	return ""
 }
 
 // HookEventState returns the activity state a Claude Code hook event implies, and
@@ -661,26 +686,88 @@ type HookPayload struct {
 	Message          string `json:"message"`
 }
 
-// idleNotificationMessage is the text of Claude Code's idle reminder, for a
-// version whose Notification payload predates notification_type.
-const idleNotificationMessage = "Claude is waiting for your input"
+// Claude Code's Notification types: the hook's notification_type field, also
+// its matcher values (https://code.claude.com/docs/en/hooks, Notification).
+//
+// blockingNotifications are prompts the agent cannot get past without the user.
+var blockingNotifications = map[string]bool{
+	"permission_prompt":      true, // a tool or network permission dialog is up
+	"elicitation_dialog":     true, // an MCP server asks the user for input
+	"elicitation_url_dialog": true, // an MCP server asks the user to open a URL
+	"agent_needs_input":      true, // a teammate needs the user's input
+}
 
-// NotificationNeedsUser reports whether a Notification hook means the agent is
-// blocked on the user (a permission prompt, a question, an elicitation) and so
-// implies the waiting state. Claude Code also fires Notification for its idle
-// reminder some time after a finished turn and for a successful login; neither
-// is a prompt, and reporting them as waiting would flip a finished agent to
-// "waiting" — making its coordinator look blocked on it and waking the
-// coordinator for nothing. Unknown types count as needing the user, so a new
-// kind of prompt is never hidden.
-func NotificationNeedsUser(p HookPayload) bool {
-	switch p.NotificationType {
-	case "idle_prompt", "auth_success":
-		return false
-	case "":
-		return strings.TrimSpace(p.Message) != idleNotificationMessage
+// ignoredNotifications are documented notices that are not prompts: the state
+// stands. idle_prompt is the reminder Claude sends ~60s after a finished turn
+// that the user has not answered — the agent is idle, not blocked.
+var ignoredNotifications = map[string]bool{
+	"idle_prompt":                true,
+	"auth_success":               true,
+	"auth_storage_failure":       true,
+	"elicitation_complete":       true,
+	"elicitation_response":       true,
+	"agent_completed":            true,
+	"quota_auto_resume_fired":    true,
+	"quota_auto_resume_stale":    true,
+	"quota_auto_resume_disabled": true,
+	"plugin_notification":        true,
+}
+
+// Legacy Notification messages, for a Claude Code whose payload predates
+// notification_type. Those versions fired Notification only for a permission
+// prompt ("Claude needs your permission to use Bash") and the idle reminder.
+const (
+	legacyIdleMessage       = "Claude is waiting for your input"
+	legacyPermissionMessage = "Claude needs your permission"
+)
+
+// NotificationClass is how amux reads one Notification hook.
+type NotificationClass int
+
+const (
+	// NotificationIgnored is a known notice that is not a prompt (the idle
+	// reminder, a login): the agent's state stands.
+	NotificationIgnored NotificationClass = iota
+	// NotificationBlocking is a prompt the agent is blocked on: waiting.
+	NotificationBlocking
+	// NotificationUnrecognized is a type (or legacy message) amux does not
+	// know. It leaves the state alone — a false "waiting" tells the user they
+	// are needed when they are not, while a real permission or question dialog
+	// still reports waiting through PermissionRequest — and the hook reports
+	// it to the daemon log so a new type gets classified.
+	NotificationUnrecognized
+)
+
+// ClassifyNotification decides what a Notification hook means for the agent's
+// state. "waiting" means blocked on the user, so only a prompt (permission,
+// elicitation, a teammate needing input) is waiting. Claude Code also fires
+// Notification for its idle reminder about a minute after every finished turn;
+// reporting that as waiting flipped every idle agent — and the coordinator
+// above it — to the attention chip. With no notification_type (an older Claude
+// Code) the message decides: the permission text is waiting, the idle text is
+// ignored, anything else is unrecognized.
+func ClassifyNotification(p HookPayload) NotificationClass {
+	t := strings.TrimSpace(p.NotificationType)
+	switch {
+	case blockingNotifications[t]:
+		return NotificationBlocking
+	case ignoredNotifications[t]:
+		return NotificationIgnored
+	case t == "":
+		msg := strings.TrimSpace(p.Message)
+		switch {
+		case strings.HasPrefix(msg, legacyPermissionMessage):
+			return NotificationBlocking
+		case msg == legacyIdleMessage:
+			return NotificationIgnored
+		}
 	}
-	return true
+	return NotificationUnrecognized
+}
+
+// NotificationNeedsUser reports whether a Notification hook implies waiting.
+func NotificationNeedsUser(p HookPayload) bool {
+	return ClassifyNotification(p) == NotificationBlocking
 }
 
 // StatusLinePayload is the subset of Claude Code's status-line JSON amux needs.
@@ -918,11 +1005,16 @@ func encodeHooks(root map[string]any, amuxPath string, inherited map[string]any,
 	// permission-observation hook on prompt lifecycle events. Some events (Stop,
 	// SessionEnd, UserPromptSubmit, PostToolUse) get more than one.
 	amuxCmds := map[string][]string{}
+	matchers := map[string]string{} // status-hook command -> its matcher
 	for _, he := range hookEvents {
 		if goal && he.event == "Stop" {
 			continue // the goal Stop hook reports this event's activity itself
 		}
-		amuxCmds[he.event] = append(amuxCmds[he.event], amuxPath+" agent hook "+he.state)
+		cmd := amuxPath + " agent hook " + he.state
+		amuxCmds[he.event] = append(amuxCmds[he.event], cmd)
+		if he.matcher != "" {
+			matchers[he.event+"\x00"+cmd] = he.matcher
+		}
 	}
 	if goal {
 		for _, gh := range goalHooks {
@@ -951,7 +1043,11 @@ func encodeHooks(root map[string]any, amuxPath string, inherited map[string]any,
 			}
 		}
 		for _, cmd := range amuxCmds[event] {
-			groups = append(groups, map[string]any{"hooks": []any{hookCommand(cmd)}})
+			group := map[string]any{"hooks": []any{hookCommand(cmd)}}
+			if m := matchers[event+"\x00"+cmd]; m != "" {
+				group["matcher"] = m
+			}
+			groups = append(groups, group)
 		}
 		hooks[event] = groups
 	}

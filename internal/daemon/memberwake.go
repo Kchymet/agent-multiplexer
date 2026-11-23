@@ -100,7 +100,19 @@ func (d *Daemon) observeWorkgroups(rows []core.Session) {
 			kick = true
 		}
 	}
+	// A coordinator that left the rail (archived, deleted) had its active
+	// items carried over to the global inbox in that transaction; tell its owner.
+	// The first poll after a (re)start offers whatever was left unnotified.
+	offerItems := !w.primed
+	for id := range w.roots {
+		if _, still := roots[id]; !still {
+			offerItems = true
+		}
+	}
 	w.members, w.roots, w.primed = members, roots, true
+	if offerItems {
+		d.offerItemWakes()
+	}
 	if kick {
 		d.prs.Kick()
 	}

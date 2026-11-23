@@ -84,6 +84,11 @@ const (
 	// KindMember is a member's activity change the daemon observed and handed
 	// in with Notify: it finished its turn, is waiting on the user, stopped.
 	KindMember = "member"
+	// KindItems announces upward-signal items (internal/items) a recipient has not
+	// been told about. Workgroup and SessionID both name the recipient — a
+	// coordinator, or the console — so a burst coalesces to one wake per
+	// recipient; Deliver reads the items themselves at delivery time.
+	KindItems = "items"
 )
 
 // Member is one active workgroup member whose PRs are watched.
@@ -132,7 +137,7 @@ type Wake struct {
 	Branch    string // the member branch that owned the PR
 	PRBranch  string // the observed PR head (Branch or a permitted suffix)
 	Text      string
-	// Kind is KindPR or KindMember. A member wake carries the member State it
+	// Kind is KindPR, KindMember or KindItems. A member wake carries the member State it
 	// reports instead of Repo/Branch/PRBranch, and Deliver drops it when the
 	// member has moved on by delivery time.
 	Kind  string

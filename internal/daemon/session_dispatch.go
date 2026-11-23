@@ -95,6 +95,11 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 			// Blocks by design: never under the admission locks below.
 			return r.dispatchWait(ctx, request.Principal, req, action)
 		}
+		if isItemOperation(req) {
+			// Item verbs act only as the caller and take only its (and, for a
+			// raise, its workgroup root's) session locks (items.go).
+			return r.dispatchItems(ctx, request.Principal, req, action)
+		}
 	}
 	if isSessionReport(req) {
 		// A report reads and writes only its own session's state, so it waits
