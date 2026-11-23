@@ -89,6 +89,60 @@ type Session struct {
 	// the daemon predates the watcher. A pointer, like Caps, so Session stays a
 	// comparable struct.
 	PRs *SessionPRs `json:"prs,omitempty"`
+
+	// SubState refines State for a row whose presented state is not its own
+	// turn's activity (a SubState* value). Today only a workgroup coordinator
+	// sets it: SubStateSupervising when its own turn is between turns or
+	// goal-waiting while members it dispatched are still running or waiting
+	// (or, with its goal waiting, member PRs are still open), so the row reads
+	// as working instead of ready/idle. Additive/omitempty: a consumer that
+	// predates it keeps reading State, which already carries the workgroup's
+	// most demanding state.
+	SubState string `json:"subState,omitempty"`
+
+	// Supervision details a workgroup coordinator row: its own activity, its
+	// goal, and the members/PRs it is waiting on. Set on every active
+	// coordinator row; nil on every other row and from a daemon that predates
+	// it. A pointer, like PRs, so Session stays comparable.
+	Supervision *Supervision `json:"supervision,omitempty"`
+}
+
+// Session sub-states (Session.SubState).
+const (
+	// SubStateSupervising: a coordinator that is not itself mid-turn while the
+	// work it dispatched is in flight. State is then running (or waiting, when
+	// a member needs the user), never ready/idle.
+	SubStateSupervising = "supervising"
+)
+
+// Supervision is a coordinator row's view of its own work (Session.Supervision).
+type Supervision struct {
+	// OwnState is the coordinator's own turn activity (a State* value), which
+	// Session.State may outrank with its members'.
+	OwnState string `json:"ownState"`
+	// Goal is the coordinator's goal status in goal mode: active | waiting |
+	// input | blocked | budgetLimited | paused | complete, or "none" for a goal
+	// coordinator with no goal; empty when not in goal mode or unknown.
+	Goal string `json:"goal,omitempty"`
+	// GoalNote is the coordinator's last word on a non-active goal: what it is
+	// waiting on, the question it asked, why it is blocked. Bounded.
+	GoalNote string `json:"goalNote,omitempty"`
+	// Members lists the members still in flight — running, waiting or unknown,
+	// or owning an open PR — in creation order.
+	Members []SupervisedMember `json:"members,omitempty"`
+	// Reason is a one-line human summary of what the coordinator is waiting on
+	// (also appended to Session.Status).
+	Reason string `json:"reason,omitempty"`
+}
+
+// SupervisedMember is one in-flight member of a coordinator (Supervision.Members).
+type SupervisedMember struct {
+	ID    string `json:"id"`
+	Title string `json:"title,omitempty"`
+	State string `json:"state"`
+	// PRs summarizes the member's open PRs, e.g. "PR #12 CI…" (the member row's
+	// PRs field has the detail).
+	PRs string `json:"prs,omitempty"`
 }
 
 // SessionPRs is Session.PRs' list.

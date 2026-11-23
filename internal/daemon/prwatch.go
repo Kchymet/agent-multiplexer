@@ -553,6 +553,21 @@ func (d *Daemon) coordinatorGoalStatus(sess store.Session) string {
 	return status
 }
 
+// coordinatorGoalInfo is coordinatorGoalStatus plus the goal's note (what a
+// hook-goal coordinator is waiting on, the question it asked, why it is
+// blocked) for the coordinator row's supervision detail. A native (Codex) goal
+// carries no such note.
+func (d *Daemon) coordinatorGoalInfo(sess store.Session) (status, note string) {
+	status, _ = d.coordinatorGoalStatusKnown(sess)
+	if status == "" || status == "none" || !agent.HookGoals(sess) {
+		return status, ""
+	}
+	if st, err := readHookGoal(sess); err == nil {
+		note = st.Note
+	}
+	return status, note
+}
+
 // coordinatorGoalStatusKnown distinguishes a coordinator with no goal from a
 // goal coordinator whose state could not be read. Status surfaces retain the
 // empty-string fallback, but automatic wake-up fails closed on known=false.

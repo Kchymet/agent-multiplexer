@@ -33,6 +33,9 @@ const (
 	// the hooks, or one that hasn't fired its first event). Shown as "unknown":
 	// live, without claiming a turn is in flight.
 	StateUnknown = harnessproto.StateUnknown
+	// SubStateSupervising refines a coordinator row (Session.SubState): it is
+	// between turns while the members it dispatched are working.
+	SubStateSupervising = harnessproto.SubStateSupervising
 )
 
 // Rail sections, top to bottom (Session.Section). The console is sectionless and
