@@ -84,9 +84,8 @@ func restrictedQueryRequest(query sessionrpc.Query, dst any) error {
 }
 
 // restrictedReport publishes one self-only observation through the fixed
-// authenticated session context. The context query and action deliberately use
-// one client: the returned generation is only correlation, while the daemon's
-// final effect gate decides whether that incarnation is still current.
+// authenticated session context, in one call. The daemon's final effect gate
+// decides whether the runtime incarnation is still current.
 func restrictedReport(verb string, fields map[string]string) error {
 	return restrictedReportWithin(35*time.Second, verb, fields)
 }
@@ -120,35 +119,27 @@ func restrictedReportWithin(timeout time.Duration, verb string, fields map[strin
 	defer client.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	contextResult, err := client.Query(ctx, sessionrpc.Query{Verb: sessionreport.Context})
-	for errors.Is(err, os.ErrNotExist) {
-		// No service record yet: a freshly created session's runtime starts
-		// before the daemon serves its mailbox, and its first reports (session
-		// start, the initial prompt) would otherwise be lost, leaving the member
-		// "unknown" for its whole first turn. Nothing was published, so retry
-		// within the report's deadline.
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("read current report context: session mailbox is not served yet: %w", err)
-		case <-time.After(reportServiceRetry):
-		}
-		contextResult, err = client.Query(ctx, sessionrpc.Query{Verb: sessionreport.Context})
-	}
-	if err != nil {
-		return fmt.Errorf("read current report context: %w", err)
-	}
-	var reportContext struct {
-		RuntimeGeneration string `json:"runtime_generation"`
-	}
-	if len(contextResult.Body) == 0 || json.Unmarshal(contextResult.Body, &reportContext) != nil || reportContext.RuntimeGeneration == "" {
-		return fmt.Errorf("read current report context: invalid response")
-	}
 	reportFields := cloneCLIFields(fields)
 	if reportFields == nil {
 		reportFields = make(map[string]string)
 	}
-	reportFields[sessionreport.FieldRuntimeGeneration] = reportContext.RuntimeGeneration
-	result, callErr := client.Action(ctx, sessionrpc.Action{Verb: verb, Fields: reportFields})
+	// One call: the daemon applies a report that names no runtime generation
+	// to the current runtime. It used to take a report-context query first,
+	// which doubled every hook's and status line's mailbox traffic for a value
+	// the daemon's effect gate re-checks anyway (2026-11-22 saturation).
+	result, callErr := untilServed(ctx, "deliver self report", func() (sessionrpc.Result, error) {
+		return client.Action(ctx, sessionrpc.Action{Verb: verb, Fields: reportFields})
+	})
+	if legacyReportDaemon(callErr) {
+		// A daemon that predates the optional field refuses the report as
+		// invalid without applying it: fetch the generation the old way.
+		generation, err := reportContextGeneration(ctx, client)
+		if err != nil {
+			return err
+		}
+		reportFields[sessionreport.FieldRuntimeGeneration] = generation
+		result, callErr = client.Action(ctx, sessionrpc.Action{Verb: verb, Fields: reportFields})
+	}
 	var response core.Result
 	if len(result.Body) != 0 {
 		if err := json.Unmarshal(result.Body, &response); err != nil {
@@ -168,6 +159,49 @@ func restrictedReportWithin(timeout time.Duration, verb string, fields map[strin
 		return fmt.Errorf("%s", response.Error)
 	}
 	return nil
+}
+
+// untilServed runs call, retrying while the session's mailbox has no service
+// record yet: a freshly created session's runtime starts before the daemon
+// serves its mailbox, and its first reports (session start, the initial
+// prompt) would otherwise be lost, leaving the member "unknown" for its whole
+// first turn. Nothing was published, so retrying within ctx is safe.
+func untilServed(ctx context.Context, what string, call func() (sessionrpc.Result, error)) (sessionrpc.Result, error) {
+	result, err := call()
+	for errors.Is(err, os.ErrNotExist) {
+		select {
+		case <-ctx.Done():
+			return result, fmt.Errorf("%s: session mailbox is not served yet: %w", what, err)
+		case <-time.After(reportServiceRetry):
+		}
+		result, err = call()
+	}
+	return result, err
+}
+
+// legacyReportDaemon reports whether err is an older daemon refusing a self
+// report for lacking runtime_generation. Such a refusal applies nothing.
+func legacyReportDaemon(err error) bool {
+	var remote *sessionrpc.RemoteError
+	return errors.As(err, &remote) && remote.Status == sessionrpc.StatusInvalid && remote.Code == "report_invalid"
+}
+
+// reportContextGeneration asks the daemon for the current runtime generation:
+// the legacy report preamble, needed only by a daemon older than this client.
+func reportContextGeneration(ctx context.Context, client restrictedSessionRPC) (string, error) {
+	contextResult, err := untilServed(ctx, "read current report context", func() (sessionrpc.Result, error) {
+		return client.Query(ctx, sessionrpc.Query{Verb: sessionreport.Context})
+	})
+	if err != nil {
+		return "", fmt.Errorf("read current report context: %w", err)
+	}
+	var reportContext struct {
+		RuntimeGeneration string `json:"runtime_generation"`
+	}
+	if len(contextResult.Body) == 0 || json.Unmarshal(contextResult.Body, &reportContext) != nil || reportContext.RuntimeGeneration == "" {
+		return "", fmt.Errorf("read current report context: invalid response")
+	}
+	return reportContext.RuntimeGeneration, nil
 }
 
 func cloneCLIFields(fields map[string]string) map[string]string {

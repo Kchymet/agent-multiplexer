@@ -103,20 +103,51 @@ func TestRestrictedQueryUsesNormalizedRPCBody(t *testing.T) {
 	}
 }
 
-func TestRestrictedReportQueriesAndEchoesCurrentGeneration(t *testing.T) {
+// TestRestrictedReportIsOneCall pins the 2026-11-22 amplification fix: a self
+// report is one mailbox call, with no report-context round trip first.
+func TestRestrictedReportIsOneCall(t *testing.T) {
 	body, _ := json.Marshal(core.Result{Type: "result", OK: true})
-	rpc := &fakeRestrictedRPC{
-		query:  sessionrpc.Result{Status: sessionrpc.StatusOK, Body: []byte(`{"runtime_generation":"opaque-current"}`)},
-		action: sessionrpc.Result{Status: sessionrpc.StatusOK, Body: body},
-	}
+	rpc := &fakeRestrictedRPC{action: sessionrpc.Result{Status: sessionrpc.StatusOK, Body: body}}
 	installRestrictedRPC(t, rpc)
 	if err := restrictedReport(sessionreport.Activity, map[string]string{sessionreport.FieldState: core.StateReady}); err != nil {
 		t.Fatal(err)
 	}
-	if len(rpc.queries) != 1 || rpc.queries[0].Verb != sessionreport.Context || len(rpc.actions) != 1 {
+	if len(rpc.queries) != 0 || len(rpc.actions) != 1 {
 		t.Fatalf("report calls queries=%+v actions=%+v", rpc.queries, rpc.actions)
 	}
-	if got := rpc.actions[0].Fields[sessionreport.FieldRuntimeGeneration]; got != "opaque-current" {
+	if got, named := rpc.actions[0].Fields[sessionreport.FieldRuntimeGeneration]; named {
+		t.Fatalf("report named runtime generation %q; the daemon resolves the current one", got)
+	}
+}
+
+// legacyReportRPC refuses a report without runtime_generation the way a daemon
+// that predates the optional field does.
+type legacyReportRPC struct{ fakeRestrictedRPC }
+
+func (l *legacyReportRPC) Action(ctx context.Context, action sessionrpc.Action) (sessionrpc.Result, error) {
+	if _, ok := action.Fields[sessionreport.FieldRuntimeGeneration]; !ok {
+		l.actionCalls++
+		l.actions = append(l.actions, action)
+		return sessionrpc.Result{Status: sessionrpc.StatusInvalid, Code: "report_invalid"},
+			&sessionrpc.RemoteError{Status: sessionrpc.StatusInvalid, Code: "report_invalid"}
+	}
+	return l.fakeRestrictedRPC.Action(ctx, action)
+}
+
+func TestRestrictedReportFallsBackToContextForLegacyDaemon(t *testing.T) {
+	body, _ := json.Marshal(core.Result{Type: "result", OK: true})
+	rpc := &legacyReportRPC{fakeRestrictedRPC{
+		query:  sessionrpc.Result{Status: sessionrpc.StatusOK, Body: []byte(`{"runtime_generation":"opaque-current"}`)},
+		action: sessionrpc.Result{Status: sessionrpc.StatusOK, Body: body},
+	}}
+	installRestrictedRPC(t, rpc)
+	if err := restrictedReport(sessionreport.Activity, map[string]string{sessionreport.FieldState: core.StateReady}); err != nil {
+		t.Fatal(err)
+	}
+	if len(rpc.queries) != 1 || rpc.queries[0].Verb != sessionreport.Context || len(rpc.actions) != 2 {
+		t.Fatalf("report calls queries=%+v actions=%+v", rpc.queries, rpc.actions)
+	}
+	if got := rpc.actions[1].Fields[sessionreport.FieldRuntimeGeneration]; got != "opaque-current" {
 		t.Fatalf("runtime generation = %q", got)
 	}
 }
@@ -140,20 +171,20 @@ func TestRepoShortcutCreatesAndStartsCoordinatorWorkgroup(t *testing.T) {
 	}
 }
 
-// unservedThenServedRPC fails the report-context query as an unpublished
-// mailbox (no service record) a few times, then answers normally.
+// unservedThenServedRPC fails the report as an unpublished mailbox (no
+// service record) a few times, then answers normally.
 type unservedThenServedRPC struct {
 	fakeRestrictedRPC
 	unserved int
 }
 
-func (u *unservedThenServedRPC) Query(ctx context.Context, query sessionrpc.Query) (sessionrpc.Result, error) {
+func (u *unservedThenServedRPC) Action(ctx context.Context, action sessionrpc.Action) (sessionrpc.Result, error) {
 	if u.unserved > 0 {
 		u.unserved--
-		u.queryCalls++
+		u.actionCalls++
 		return sessionrpc.Result{}, fmt.Errorf("read service: %w", os.ErrNotExist)
 	}
-	return u.fakeRestrictedRPC.Query(ctx, query)
+	return u.fakeRestrictedRPC.Action(ctx, action)
 }
 
 // TestReportWaitsForUnservedMailbox pins that a self report made before the
@@ -169,7 +200,7 @@ func TestReportWaitsForUnservedMailbox(t *testing.T) {
 	if err := restrictedReport(sessionreport.Activity, map[string]string{sessionreport.FieldState: core.StateRunning}); err != nil {
 		t.Fatalf("report after mailbox publication = %v", err)
 	}
-	if rpc.queryCalls != 3 || len(rpc.actions) != 1 || rpc.actions[0].Fields[sessionreport.FieldState] != core.StateRunning {
-		t.Fatalf("queries %d, actions %+v", rpc.queryCalls, rpc.actions)
+	if rpc.actionCalls != 3 || len(rpc.actions) != 1 || rpc.actions[0].Fields[sessionreport.FieldState] != core.StateRunning {
+		t.Fatalf("calls %d, actions %+v", rpc.actionCalls, rpc.actions)
 	}
 }

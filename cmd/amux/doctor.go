@@ -169,6 +169,27 @@ func cmdDoctor() error {
 		fmt.Printf("              %d repos · %d workgroups · %d agents\n", len(repos), len(roots), agents)
 	}
 
+	// Session RPC: the response budget every agent's hooks, credential reads
+	// and actions draw on. Refusals mean agents were (or are) being stalled.
+	if daemonUp {
+		if budget, ok := queryRPCBudget(); ok {
+			mark := "✓"
+			if budget.Rejected > 0 || budget.Files*4 >= budget.MaxFiles*3 {
+				mark = "⚠"
+			}
+			for i, line := range rpcBudgetLines(budget, time.Now()) {
+				if i == 0 {
+					fmt.Printf("  %s %s\n", mark, line)
+				} else {
+					fmt.Printf("    %s\n", line)
+				}
+			}
+		}
+	}
+	for _, line := range daemonLogLines(core.LogPath()) {
+		fmt.Println(line)
+	}
+
 	// Reconcile the store against on-disk worktree dirs and branches: surface
 	// leftovers (a crash or a bug that removed a store row but not its dir/branch)
 	// and the reverse (a store row whose dir vanished). Reads only through the

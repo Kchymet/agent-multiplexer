@@ -360,7 +360,7 @@ func daemonRun() error {
 	// spawned daemon); a daemon run in a terminal is left alone.
 	logrotate.Watch(ctx, logrotate.Policy{
 		Path: core.LogPath(), MaxBytes: logrotate.DefaultMaxBytes, Keep: logrotate.DefaultKeep,
-		FDs: []int{1, 2},
+		FDs: []int{1, 2}, MaxTotal: logrotate.DefaultMaxTotal, Compress: true,
 	}, logrotate.DefaultInterval, log.Printf)
 	d := daemon.Default(self)
 	if err := d.Run(ctx); err != nil || !d.RestartForUpdate() || ctx.Err() != nil {

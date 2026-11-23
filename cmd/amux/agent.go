@@ -233,11 +233,13 @@ func cmdAgentStatus(args []string, hook bool) error {
 	if len(args) != 1 {
 		return hookResult(hook, fmt.Errorf("activity state is required"))
 	}
+	conversation := ""
 	if hook {
 		var payload claudecfg.HookPayload
 		if err := readHookJSON(&payload); err != nil {
 			return nil
 		}
+		conversation = payload.SessionID
 		switch payload.HookEventName {
 		case "Notification":
 			switch claudecfg.ClassifyNotification(payload) {
@@ -257,8 +259,17 @@ func cmdAgentStatus(args []string, hook bool) error {
 			}
 		}
 	}
-	return hookResult(hook, reportWithin(hook, sessionreport.Activity,
-		map[string]string{sessionreport.FieldState: args[0]}))
+	// A hook repeating the state its conversation last delivered (PostToolUse
+	// after every tool) is skipped within activityRefresh: only changes, plus
+	// a periodic refresh, cost the daemon a call.
+	if hook && activityUnchanged(conversation, args[0]) {
+		return nil
+	}
+	err := reportWithin(hook, sessionreport.Activity, map[string]string{sessionreport.FieldState: args[0]})
+	if hook && err == nil {
+		recordActivity(conversation, args[0])
+	}
+	return hookResult(hook, err)
 }
 
 // noticeOf names an unrecognized Claude notification for the daemon log: its

@@ -18,7 +18,7 @@ import (
 )
 
 // Defaults: at most DefaultMaxBytes in the live log plus DefaultKeep rotated
-// generations, so the daemon log never takes more than ~256 MiB of disk.
+// generations; Bound additionally caps the generations at DefaultMaxTotal.
 const (
 	DefaultMaxBytes = 64 << 20
 	DefaultKeep     = 3
@@ -36,6 +36,12 @@ type Policy struct {
 	// FDs are the descriptors that may point at Path (stdout and stderr in
 	// production). Only those currently referring to Path are redirected.
 	FDs []int
+	// MaxTotal bounds all rotated generations together (see Bound); zero
+	// leaves the total unbounded.
+	MaxTotal int64
+	// Compress gzips generations 2 and older (Path.N.gz); Path.1 stays plain
+	// so the most recent history can still be read with tail or grep.
+	Compress bool
 }
 
 // Watch checks the policy immediately and then every interval until ctx ends.
@@ -44,15 +50,24 @@ func Watch(ctx context.Context, p Policy, interval time.Duration, logf func(stri
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
-	check := func() {
+	rotate := func() {
 		if rotated, err := RotateIfLarge(p); err != nil {
 			logf("daemon log rotation failed: %v", err)
 		} else if rotated {
 			logf("daemon log rotated: previous log is %s.1 (keeping %d generations of %d MiB)", p.Path, p.Keep, p.MaxBytes>>20)
 		}
 	}
-	check()
+	// Bound compresses and trims, which can take a while for an outsized
+	// legacy generation: never on the caller's (daemon startup's) goroutine.
+	bound := func() {
+		if err := Bound(p); err != nil {
+			logf("daemon log bound failed: %v", err)
+		}
+	}
+	check := func() { rotate(); bound() }
+	rotate()
 	go func() {
+		bound()
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
@@ -82,10 +97,12 @@ func RotateIfLarge(p Policy) (bool, error) {
 		return false, nil
 	}
 	for i := p.Keep - 1; i >= 1; i-- {
-		older := fmt.Sprintf("%s.%d", p.Path, i)
-		if _, err := os.Lstat(older); err == nil {
-			if err := os.Rename(older, fmt.Sprintf("%s.%d", p.Path, i+1)); err != nil {
-				return false, err
+		for _, suffix := range []string{"", ".gz"} {
+			older := fmt.Sprintf("%s.%d%s", p.Path, i, suffix)
+			if _, err := os.Lstat(older); err == nil {
+				if err := os.Rename(older, fmt.Sprintf("%s.%d%s", p.Path, i+1, suffix)); err != nil {
+					return false, err
+				}
 			}
 		}
 	}

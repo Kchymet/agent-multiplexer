@@ -50,6 +50,14 @@ type ServerOptions struct {
 	// response, or that waited that long before its processing began (its Age),
 	// so a stall can be attributed to the phase that held it, or to the queue.
 	SlowRequest func(RequestTiming)
+	// Priority, if set, classifies a call for response admission. It sees the
+	// call before authentication and may only choose an admission class: a
+	// rejected low-priority call no longer blocks a higher-priority one queued
+	// behind it in the same pass. Nil classifies every call PriorityNormal.
+	Priority func(Call) Priority
+	// ResponseTTL bounds how long a published response that awaits no receipt
+	// waits for its client. Zero means DefaultResponseTTL.
+	ResponseTTL time.Duration
 }
 
 // SlowRequestThreshold is the processing time that reports a request to
@@ -175,6 +183,10 @@ type Server struct {
 	notify func()
 	// slowRequest is ServerOptions.SlowRequest.
 	slowRequest func(RequestTiming)
+	// priority is ServerOptions.Priority; responseTTL is the resolved
+	// ServerOptions.ResponseTTL.
+	priority    func(Call) Priority
+	responseTTL time.Duration
 
 	// slow-lane state; inflight is guarded by mu. publishMu serializes every
 	// use of the shared responseUsage and responseCleanup directory streams,
@@ -304,6 +316,11 @@ func OpenServerMailbox(subjectID, trustedMailboxHostDir string, authority Author
 	notify := options.RequestNotify
 	server.notify = notify
 	server.slowRequest = options.SlowRequest
+	server.priority = options.Priority
+	server.responseTTL = options.ResponseTTL
+	if server.responseTTL <= 0 {
+		server.responseTTL = DefaultResponseTTL
+	}
 	if options.Slow != nil {
 		server.slow = options.Slow
 		server.slowJobs = make(chan slowJob, MaxSlowRequests)
@@ -390,8 +407,11 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 	processed := 0
 	overflow := false
 	laneFull := false // see processOrDefer
-	// blocked records exhausted response capacity. The pass continues so a
-	// release queued behind a blocked request can still free that capacity.
+	// gate records exhausted response capacity per priority. The pass
+	// continues so a release queued behind a blocked request can still free
+	// that capacity, and so a credential read or control action queued behind
+	// refused telemetry is still admitted from the capacity reserved for it.
+	gate := &admissionGate{}
 	blocked := false
 
 	processingNames, more, err := listNames(s.processing, MaxQueuedRequests)
@@ -410,7 +430,7 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 			processed++
 			continue
 		}
-		if err := s.processOrDefer(ctx, name, !blocked, &laneFull); errors.Is(err, ErrResponseCapacity) {
+		if err := s.processOrDefer(ctx, name, gate, &laneFull); errors.Is(err, ErrResponseCapacity) {
 			blocked = true
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return processed, err
@@ -463,7 +483,7 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 				return processed, err
 			}
 			if claimed {
-				if err := s.processOrDefer(ctx, name, !blocked, &laneFull); errors.Is(err, ErrResponseCapacity) {
+				if err := s.processOrDefer(ctx, name, gate, &laneFull); errors.Is(err, ErrResponseCapacity) {
 					blocked = true
 				} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 					return processed, err
@@ -546,13 +566,13 @@ func (s *Server) Run(ctx context.Context) error {
 // processOrDefer dispatches a claimed request now, or hands it to the slow
 // lane. A request the lane already owns is skipped; one the lane has no room
 // for stays claimed for a later pass.
-// admit is processClaimed's: a pass blocked on response capacity hands no new
-// work to the lane either. laneFull is per pass: once the lane had no room, the
+// gate is processClaimed's: a pass blocked on response capacity at or above
+// this call's priority hands it to no lane either. laneFull is per pass: once the lane had no room, the
 // pass hands it nothing more, so a slot freed mid-pass cannot go to a later
 // request ahead of the one just left waiting.
-func (s *Server) processOrDefer(ctx context.Context, name string, admit bool, laneFull *bool) error {
+func (s *Server) processOrDefer(ctx context.Context, name string, gate *admissionGate, laneFull *bool) error {
 	if s.slow == nil && s.parallel == nil {
-		return s.processClaimed(ctx, name, admit)
+		return s.processClaimed(ctx, name, gate)
 	}
 	s.mu.Lock()
 	_, owned := s.inflight[name]
@@ -561,14 +581,14 @@ func (s *Server) processOrDefer(ctx context.Context, name string, admit bool, la
 	if owned || ownedParallel {
 		return nil
 	}
-	slow, parallel := s.claimedLane(name)
+	slow, parallel, priority := s.claimedLane(name)
 	if parallel {
-		return s.startParallel(name, admit)
+		return s.startParallel(name, gate.allows(priority))
 	}
 	if !slow {
-		return s.processClaimed(ctx, name, admit)
+		return s.processClaimed(ctx, name, gate)
 	}
-	if !admit {
+	if !gate.allows(priority) {
 		return ErrResponseCapacity
 	}
 	if *laneFull {
@@ -587,23 +607,24 @@ func (s *Server) processOrDefer(ctx context.Context, name string, admit bool, la
 
 // claimedLane peeks at a claimed request's unauthenticated call to pick its
 // lane. Anything unreadable is processed inline, which rejects it.
-func (s *Server) claimedLane(name string) (slow, parallel bool) {
+func (s *Server) claimedLane(name string) (slow, parallel bool, priority Priority) {
 	raw, err := readRegularAt(s.processing, name, maxEnvelopeFileBytes)
 	if err != nil {
-		return false, false
+		return false, false, PriorityNormal
 	}
 	var envelope access.SignedRequest
 	if unmarshalBounded(raw, maxEnvelopeFileBytes, &envelope) != nil {
-		return false, false
+		return false, false, PriorityNormal
 	}
 	var call Call
 	if unmarshalBounded(envelope.Body, access.MaxBodyBytes, &call) != nil || call.Kind != CallOperation {
-		return false, false
+		return false, false, PriorityNormal
 	}
+	priority = s.priorityOf(call)
 	if s.parallel != nil && s.parallel(cloneCall(call)) {
-		return false, true
+		return false, true, priority
 	}
-	return s.slow != nil && s.slow(cloneCall(call)), false
+	return s.slow != nil && s.slow(cloneCall(call)), false, priority
 }
 
 // startParallel dispatches a claimed parallel-lane request on its own
@@ -622,7 +643,7 @@ func (s *Server) startParallel(name string, admit bool) error {
 	s.mu.Unlock()
 	go func() {
 		defer s.parallelWG.Done()
-		err := s.processClaimed(s.parallelCtx, name, true)
+		err := s.processClaimed(s.parallelCtx, name, nil)
 		s.mu.Lock()
 		delete(s.parallelInflight, name)
 		s.mu.Unlock()
@@ -647,7 +668,7 @@ func (s *Server) runSlow() {
 		case <-s.slowStop:
 			return // queued jobs stay claimed for the next server
 		case job := <-s.slowJobs:
-			err := s.processClaimed(job.ctx, job.name, true)
+			err := s.processClaimed(job.ctx, job.name, nil)
 			s.mu.Lock()
 			delete(s.inflight, job.name)
 			s.mu.Unlock()
@@ -719,10 +740,12 @@ func (s *Server) claim(name string) (bool, error) {
 	return false, err
 }
 
-// processClaimed handles one claimed request. admit=false means response
-// capacity is already exhausted in this pass: only a release, which needs no
-// response, is processed and everything else stays claimed for a later pass.
-func (s *Server) processClaimed(ctx context.Context, name string, admit bool) error {
+// processClaimed handles one claimed request. A gate that refuses the call's
+// priority means response capacity for it is already exhausted in this pass:
+// only a release, which needs no response, is processed and everything else
+// stays claimed for a later pass. A nil gate (the slow and parallel lanes)
+// attempts every call.
+func (s *Server) processClaimed(ctx context.Context, name string, gate *admissionGate) error {
 	requestID, ok := requestIDFromFile(name)
 	if !ok {
 		return unlinkAt(s.processing, name)
@@ -746,6 +769,18 @@ func (s *Server) processClaimed(ctx context.Context, name string, admit bool) er
 	if unmarshalBounded(envelope.Body, access.MaxBodyBytes, &routed) == nil && routed.Kind == CallRelease {
 		return s.processRelease(ctx, name, envelope)
 	}
+	// A claimed request that expired long enough ago that its client has
+	// stopped waiting (the claimed twin of dropExpired) is discarded unanswered.
+	// Verify would only reject it, and publishing that rejection would hold a
+	// response slot nobody collects. Under load, a backlog of such abandoned
+	// hook calls otherwise consumed every slot capacity freed (2026-11-22).
+	if envelope.ExpiresAt > 0 && s.clock().After(time.UnixMilli(envelope.ExpiresAt).Add(expiredDropAfter)) {
+		return unlinkAt(s.processing, name)
+	}
+	priority := PriorityNormal
+	if routed.Kind == CallOperation {
+		priority = s.priorityOf(routed)
+	}
 	timer := s.startTimer(envelope, routed)
 	if s.slowRequest != nil {
 		ctx, timer.lockWait = access.WithLockWait(ctx)
@@ -762,11 +797,14 @@ func (s *Server) processClaimed(ctx context.Context, name string, admit bool) er
 		// settles a mandatory completion that frees capacity, so it must neither
 		// wait behind the pool it drains nor retain an unread response.
 		reservation = &responseReservation{discard: true}
-	case !admit:
+	case !gate.allows(priority):
 		return ErrResponseCapacity
 	default:
-		reservation, err = s.reserveResponse(ctx, requestID)
+		reservation, err = s.reserveResponse(ctx, requestID, priority, routed.Verb)
 		if err != nil {
+			if errors.Is(err, ErrResponseCapacity) {
+				gate.block(priority)
+			}
 			return err
 		}
 	}
@@ -1179,7 +1217,22 @@ func (s *Server) cleanupResponses() error {
 	if err != nil {
 		return err
 	}
-	cutoff := s.clock().Add(-time.Duration(access.MaxResponseAge) * time.Second)
+	now := s.clock()
+	cutoff := now.Add(-time.Duration(access.MaxResponseAge) * time.Second)
+	// A response that awaits no receipt is reclaimed once its client had
+	// responseTTL to collect it. A client that timed out or was killed never
+	// releases it, and holding its slot for MaxResponseAge let abandoned hook
+	// responses exhaust the daemon-wide budget (2026-11-22).
+	uncollected := now.Add(-s.responseTTL)
+	s.mu.Lock()
+	var awaitingReceipt map[string]struct{}
+	for requestID := range s.pending {
+		if awaitingReceipt == nil {
+			awaitingReceipt = make(map[string]struct{}, len(s.pending))
+		}
+		awaitingReceipt[requestID] = struct{}{}
+	}
+	s.mu.Unlock()
 	for _, name := range names {
 		var stat unix.Stat_t
 		if err := unix.Fstatat(int(s.responses.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
@@ -1189,11 +1242,13 @@ func (s *Server) cleanupResponses() error {
 			return err
 		}
 		mode := uint32(stat.Mode)
-		_, validName := requestIDFromResponseFile(name)
+		requestID, validName := requestIDFromResponseFile(name)
 		safe := validName && mode&unix.S_IFMT == unix.S_IFREG && stat.Nlink == 1 &&
 			stat.Uid == uint32(os.Geteuid()) && mode&0o7777 == regularFileMode &&
 			stat.Size >= 0 && stat.Size <= int64(maxEnvelopeFileBytes)
-		if !safe || statModTime(stat).Before(cutoff) {
+		_, receiptPending := awaitingReceipt[requestID]
+		modified := statModTime(stat)
+		if !safe || modified.Before(cutoff) || (!receiptPending && modified.Before(uncollected)) {
 			if err := unlinkAt(s.responses, name); err != nil {
 				return err
 			}
@@ -1345,7 +1400,33 @@ func rewindDirectory(dir *os.File) error {
 	return err
 }
 
-func (s *Server) reserveResponse(ctx context.Context, requestID string) (*responseReservation, error) {
+// admissionGate records, within one pass, the highest priority whose response
+// reservation was refused. A call at or below it is not attempted again in
+// that pass; a higher-priority call still is, from the capacity a budget
+// reserves for it. A nil gate allows everything.
+type admissionGate struct {
+	blocked bool
+	floor   Priority
+}
+
+func (g *admissionGate) allows(p Priority) bool {
+	return g == nil || !g.blocked || p > g.floor
+}
+
+func (g *admissionGate) block(p Priority) {
+	if g != nil && (!g.blocked || p > g.floor) {
+		g.blocked, g.floor = true, p
+	}
+}
+
+func (s *Server) priorityOf(call Call) Priority {
+	if s.priority == nil {
+		return PriorityNormal
+	}
+	return s.priority(cloneCall(call))
+}
+
+func (s *Server) reserveResponse(ctx context.Context, requestID string, priority Priority, verb string) (*responseReservation, error) {
 	s.publishMu.Lock()
 	err := s.ensureResponseCapacity(maxEnvelopeFileBytes)
 	s.publishMu.Unlock()
@@ -1358,6 +1439,7 @@ func (s *Server) reserveResponse(ctx context.Context, requestID string) (*respon
 	}
 	lease, err := s.responseBudget.ReserveResponse(ctx, ResponseReservation{
 		SubjectID: s.subjectID, RequestID: requestID, MaxBytes: int64(maxEnvelopeFileBytes), ReceiptSlot: true,
+		Priority: priority, Verb: verb,
 	})
 	if err != nil || lease == nil {
 		return nil, fmt.Errorf("%w: daemon response budget admission", ErrResponseCapacity)

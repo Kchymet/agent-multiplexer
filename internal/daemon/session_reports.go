@@ -61,8 +61,13 @@ func validateSessionReport(req access.Request) error {
 	if req.Route != access.RouteAction || !sessionreport.IsVerb(req.Verb) {
 		return errors.New("unknown self report operation")
 	}
-	required := []string{sessionreport.FieldRuntimeGeneration}
-	allowed := append([]string(nil), required...)
+	// runtime_generation is optional. Without it a report applies to the
+	// runtime current when the daemon applies it, which is exactly what the
+	// client's report-context round trip fetched just before reporting: that
+	// generation was only ever correlation, the effect gate below decides.
+	// Dropping the round trip halves every hook's mailbox traffic.
+	var required []string
+	allowed := []string{sessionreport.FieldRuntimeGeneration}
 	switch req.Verb {
 	case sessionreport.Activity:
 		allowed = append(allowed, sessionreport.FieldState)
@@ -235,6 +240,13 @@ func decodeReportOptions(value string) ([]string, error) {
 	return options, nil
 }
 
+// reportGenerationReplaced reports whether a report names a runtime generation
+// other than current. A report that names none applies to the current one.
+func reportGenerationReplaced(req access.Request, current string) bool {
+	named, ok := req.Fields[sessionreport.FieldRuntimeGeneration]
+	return ok && named != current
+}
+
 type selfReportContext struct {
 	RuntimeGeneration string `json:"runtime_generation"`
 }
@@ -264,7 +276,7 @@ func (r *sessionRuntime) dispatchSessionReport(ctx context.Context, principal ac
 		}
 		return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}
 	}
-	if req.Fields[sessionreport.FieldRuntimeGeneration] != generation {
+	if reportGenerationReplaced(req, generation) {
 		return rpcDenied("report_runtime_replaced")
 	}
 	if r.beforeReportEffect != nil {
@@ -492,7 +504,7 @@ func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal a
 		release()
 		return rpcFailed("report_runtime_unavailable")
 	}
-	if req.Fields[sessionreport.FieldRuntimeGeneration] != generation {
+	if reportGenerationReplaced(req, generation) {
 		release()
 		return rpcDenied("report_runtime_replaced")
 	}
@@ -529,7 +541,7 @@ func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal a
 	if err != nil || !ok || current.Archived || current.ID != session.ID ||
 		current.ClaudeID != session.ClaudeID || current.Dir != session.Dir ||
 		!live || currentGeneration != generation ||
-		req.Fields[sessionreport.FieldRuntimeGeneration] != currentGeneration {
+		reportGenerationReplaced(req, currentGeneration) {
 		return rpcDenied("report_runtime_replaced")
 	}
 	if err := stage.Publish(); err != nil {
