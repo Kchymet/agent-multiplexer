@@ -1047,3 +1047,25 @@ Members pin to these.
   - Any other daemon refusal that carries a code relays it too. A result
     with no code omits the key.
   - Golden: `harnessproto/testdata/session_result_code.json`.
+- **Codex delivery** (item 1):
+  - **User input.** Structured Codex `request-user-input` now appears in the
+    queue as a `question` entry with `form.source: codex_request_user_input`
+    and `delivery: structured`.
+    - The entry carries `requestId` (the JSON-RPC id), and its id is
+      `q-…` over (session, generation, "codex-input", request id).
+    - Answers go back on the request's JSON-RPC id.
+    - A secret question keeps the entry from legacy clients (title prefix,
+      legacy answer gives `needs_newer_client`).
+    - Both method names, `item/tool/requestUserInput` and
+      `tool/requestUserInput`, are accepted. Before this, the `item/…`
+      spelling was refused with -32601.
+  - **Approvals.**
+    - New decision `allow_session` (`harnessproto.DecisionAllowSession`).
+      Structured Codex `permission_request` options gain
+      `{"id":"acceptForSession","label":"Allow for session","kind":"allow_session"}`.
+    - `permission` / queue answers / direct `decision` accept
+      `allow_session` for structured Codex; it is sent as
+      `acceptForSession`.
+    - PTY sessions still refuse it (no key binding). Clients offer it only
+      when the request's options list that kind.
+    - harness `validateSteering` must admit it to relay it.

@@ -128,7 +128,7 @@ func (s *Supervisor) restartWorkLocked() RestartWork {
 		if s.goal.Status == GoalActive {
 			w.GoalKey = s.goal.key()
 		}
-	} else if s.curTurn != "" && len(s.approvals.open()) == 0 {
+	} else if s.curTurn != "" && len(s.approvals.open()) == 0 && len(s.inputs.open()) == 0 {
 		w.Continue = true
 	}
 	return w

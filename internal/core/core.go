@@ -121,6 +121,9 @@ const (
 
 	SteerAllow = "allow"
 	SteerDeny  = "deny"
+	// SteerAllowSession allows for the rest of the session
+	// (harnessproto.DecisionAllowSession): structured Codex only.
+	SteerAllowSession = "allow_session"
 )
 
 // Lifecycle action verbs (Action.Action values) — the control vocabulary the CLI,

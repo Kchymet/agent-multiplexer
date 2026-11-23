@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"amux/internal/claudegoal"
+	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/queue"
 	"amux/internal/store"
@@ -211,5 +212,47 @@ func TestCoordinatorArchiveQuestionStillAnswers(t *testing.T) {
 				t.Fatalf("answer = %+v, sent %q", res, rec.sent)
 			}
 		})
+	}
+}
+
+// TestCodexUserInputEntries: a structured Codex session's open
+// request-user-input is a question entry with a structured form; a secret
+// question keeps it from legacy clients, which are refused, not misdelivered.
+func TestCodexUserInputEntries(t *testing.T) {
+	rows := []core.Session{{ID: "c1", RootID: "wg1", State: core.StateRunning, ControlMode: harnessproto.ControlModeStructured}}
+	d := fakeQueueDaemon(t, rows, nil, nil, nil, nil)
+	form := harnessproto.Form{Version: 2, Source: harnessproto.FormSourceCodexUserInput, Cancel: true, Delivery: harnessproto.DeliveryStructured,
+		Questions: []harnessproto.FormQuestion{{ID: "token", Question: "Deploy token?", Other: true, Secret: true}}}
+	base := d.queueSourcesFn
+	d.queueSourcesFn = func() queueSources {
+		src := base()
+		src.inputs = func(id string) []codexapp.UserInput {
+			if id != "c1" {
+				return nil
+			}
+			return []codexapp.UserInput{{RequestID: "ui7", Form: form}}
+		}
+		return src
+	}
+	ov := d.queueOverview(nil)
+	if len(ov.Entries) != 1 {
+		t.Fatalf("entries = %+v", ov.Entries)
+	}
+	e := ov.Entries[0]
+	if e.Kind != queue.KindQuestion || e.RequestID != "ui7" || e.Form == nil || e.Form.Delivery != harnessproto.DeliveryStructured ||
+		e.Questions != nil || !strings.HasPrefix(e.Title, queue.LegacyOmittedTitle) {
+		t.Fatalf("entry = %+v", e)
+	}
+	ctx := context.Background()
+	res := d.handle(ctx, core.Action{Action: core.ActionQueueAnswer, Fields: map[string]string{core.QueueEntryField: e.ID, core.QueueTextField: "s3cr3t"}})
+	if res.OK || res.Code != harnessproto.CodeNeedsNewerClient {
+		t.Fatalf("legacy answer to a secret = %+v", res)
+	}
+	// A v2 answer goes to the supervisor; with no live runtime it is gone.
+	other := "s3cr3t"
+	a := harnessproto.FormAnswer{Version: 2, Action: harnessproto.FormActionAnswer, Answers: []harnessproto.QuestionAnswer{{ID: "token", Other: &other}}}
+	res = d.handle(ctx, core.Action{Action: core.ActionQueueAnswer, Fields: map[string]string{core.QueueEntryField: e.ID, core.QueueFormField: formJSON(t, a)}})
+	if res.OK || res.Code != codeAskerGone {
+		t.Fatalf("v2 answer without a runtime = %+v", res)
 	}
 }

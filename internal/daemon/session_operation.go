@@ -216,8 +216,8 @@ func validateSessionSteer(fields map[string]string) error {
 			return err
 		}
 		decision := fields[core.SteerDecision]
-		if decision != core.SteerAllow && decision != core.SteerDeny {
-			return fmt.Errorf("field %q must be %q or %q", core.SteerDecision, core.SteerAllow, core.SteerDeny)
+		if decision != core.SteerAllow && decision != core.SteerDeny && decision != core.SteerAllowSession {
+			return fmt.Errorf("field %q must be %q, %q or %q", core.SteerDecision, core.SteerAllow, core.SteerDeny, core.SteerAllowSession)
 		}
 		return nil
 	default:

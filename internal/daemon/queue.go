@@ -13,6 +13,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/agent"
 	"amux/internal/claudegoal"
+	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/items"
 	"amux/internal/itemsvc"
@@ -158,8 +159,11 @@ type queueSources struct {
 	lookup    func(id string) (store.Session, bool, error)
 	questions func(h agent.Harness, s store.Session) []openQuestion
 	perms     func(id string, s store.Session) []queuePermission
-	goal      func(s store.Session) (claudegoal.State, error)
-	inbox     func() ([]items.Item, error)
+	// inputs lists a structured Codex session's open request-user-input
+	// requests (nil: none).
+	inputs func(id string) []codexapp.UserInput
+	goal   func(s store.Session) (claudegoal.State, error)
+	inbox  func() ([]items.Item, error)
 }
 
 // openQuestion is one unanswered AskUserQuestion call: its legacy questions
@@ -197,6 +201,7 @@ func (d *Daemon) queueSources() queueSources {
 		lookup:    lookupSession,
 		questions: claudeOpenQuestions,
 		perms:     d.openPermissionsFor,
+		inputs:    d.openUserInputsFor,
 		goal:      readHookGoal,
 		inbox:     readGlobalInbox,
 	}
@@ -244,6 +249,19 @@ func (d *Daemon) openPermissionsFor(id string, s store.Session) []queuePermissio
 		}
 	}
 	return out
+}
+
+// openUserInputsFor lists a structured Codex session's open request-user-input
+// requests.
+func (d *Daemon) openUserInputsFor(id string) []codexapp.UserInput {
+	if d.codex == nil {
+		return nil
+	}
+	sup, ok := d.codex.Get(id)
+	if !ok {
+		return nil
+	}
+	return sup.OpenUserInputs()
 }
 
 // claudeOpenQuestions returns a live Claude session's unanswered
@@ -346,6 +364,26 @@ func (d *Daemon) deriveQueue(src queueSources) (entries []queue.Entry, inbox que
 			entries = append(entries, e)
 		}
 		asked := false
+		if src.inputs != nil {
+			for _, in := range src.inputs(row.ID) {
+				if len(in.Form.Questions) == 0 {
+					continue
+				}
+				asked = true
+				e := base
+				e.Kind = queue.KindQuestion
+				e.ID = queue.EntryID(queue.KindQuestion, row.ID, gen, "codex-input", in.RequestID)
+				e.RequestID = in.RequestID
+				f := in.Form
+				e.Form = &f
+				e.Title = boundRunes(f.Questions[0].Question, 200)
+				if len(f.Questions) > 1 {
+					e.Title += fmt.Sprintf(" (+%d more)", len(f.Questions)-1)
+				}
+				queue.ProjectLegacy(&e)
+				entries = append(entries, e)
+			}
+		}
 		if row.State == core.StateWaiting {
 			for _, q := range src.questions(h, sess) {
 				asked = true
@@ -571,7 +609,34 @@ func (d *Daemon) deliverQuestion(ctx context.Context, e queue.Entry, f map[strin
 
 // deliverForm delivers a v2 answer through the form's channel.
 func (d *Daemon) deliverForm(ctx context.Context, e queue.Entry, a harnessproto.FormAnswer) core.Result {
+	switch e.Form.Source {
+	case harnessproto.FormSourceCodexUserInput:
+		return d.deliverCodexInput(e, a)
+	}
 	return core.Result{Type: "result", Code: harnessproto.CodeDeliveryFailed, Error: "no delivery channel for this question"}
+}
+
+// deliverCodexInput answers a structured Codex request-user-input on its own
+// JSON-RPC id. A request already answered (by us or the native TUI) or gone
+// is reported as such; nothing is typed.
+func (d *Daemon) deliverCodexInput(e queue.Entry, a harnessproto.FormAnswer) core.Result {
+	var sup *codexapp.Supervisor
+	if d.codex != nil {
+		sup, _ = d.codex.Get(e.Session)
+	}
+	if sup == nil {
+		return core.Result{Type: "result", Code: codeAskerGone, Error: fmt.Sprintf("queue entry %s: the Codex runtime is gone", e.ID)}
+	}
+	err := sup.AnswerUserInput(e.RequestID, a)
+	switch {
+	case err == nil:
+		return ok()
+	case codexapp.IsDuplicate(err):
+		return core.Result{Type: "result", Code: codeAnswered, Error: fmt.Sprintf("queue entry %s was already answered", e.ID)}
+	case codexapp.IsStale(err):
+		return core.Result{Type: "result", Code: codeAskerGone, Error: fmt.Sprintf("queue entry %s is no longer open", e.ID)}
+	}
+	return core.Result{Type: "result", Code: harnessproto.CodeDeliveryFailed, Error: fmt.Sprintf("queue entry %s: %v", e.ID, err)}
 }
 
 // typedReply renders an answer as the legacy typed reply: the chosen labels
@@ -608,8 +673,8 @@ func (d *Daemon) answerQueueEntry(ctx context.Context, e queue.Entry, f map[stri
 	switch e.Kind {
 	case queue.KindPermission:
 		decision := f[core.SteerDecision]
-		if decision != core.SteerAllow && decision != core.SteerDeny {
-			return fail("a permission answer needs -f %s=allow|deny", core.SteerDecision)
+		if decision != core.SteerAllow && decision != core.SteerDeny && decision != core.SteerAllowSession {
+			return fail("a permission answer needs -f %s=allow|deny|allow_session", core.SteerDecision)
 		}
 		if e.RuntimeGeneration == "" {
 			return core.Result{Type: "result", Code: codeAskerGone, Error: fmt.Sprintf("permission request %s has no live runtime to answer", e.RequestID)}

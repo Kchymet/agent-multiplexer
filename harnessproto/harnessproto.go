@@ -260,6 +260,11 @@ var GoalStatuses = map[string]bool{
 const (
 	DecisionAllow = "allow"
 	DecisionDeny  = "deny"
+	// DecisionAllowSession allows the request and every later one like it
+	// for the rest of the session. Only a runtime whose permission_request
+	// options list an option of kind "allow_session" accepts it (Codex
+	// structured: acceptForSession); a daemon refuses it elsewhere.
+	DecisionAllowSession = "allow_session"
 )
 
 // DecisionCleared is the resolution a TypePermissionResolved event carries when

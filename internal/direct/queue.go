@@ -600,7 +600,7 @@ func answerFields(kind string, req QueueAnswerRequest, e *queue.Entry) (map[stri
 	f := map[string]string{}
 	switch kind {
 	case queue.KindPermission:
-		if text != "" || len(req.Choice) > 0 || (req.Decision != core.SteerAllow && req.Decision != core.SteerDeny) || req.RuntimeGeneration == "" {
+		if text != "" || len(req.Choice) > 0 || (req.Decision != core.SteerAllow && req.Decision != core.SteerDeny && req.Decision != core.SteerAllowSession) || req.RuntimeGeneration == "" {
 			return nil, bad
 		}
 		if e != nil && req.RuntimeGeneration != e.RuntimeGeneration {

@@ -372,7 +372,7 @@ func (d *Daemon) steerStructured(ctx context.Context, id string, sup structuredS
 		return g.SetGoal(ctx, u)
 	case core.SteerPermission:
 		switch fields[core.SteerDecision] {
-		case core.SteerAllow, core.SteerDeny:
+		case core.SteerAllow, core.SteerDeny, core.SteerAllowSession:
 			return sup.Resolve(ctx, fields[core.SteerRequestID], fields[core.SteerDecision])
 		default:
 			return fmt.Errorf("permission: %q must be %q or %q, got %q",
