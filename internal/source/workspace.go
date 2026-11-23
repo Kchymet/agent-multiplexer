@@ -194,10 +194,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		}
 		goal, goalNote := w.goal(r)
 		view := superviseCoordinator(ownState, goal, goalNote, views)
-		status := fmt.Sprintf("%s · %d agent%s%s", stateLabel(view.lead), len(active), plural(len(active)), w.goalSuffix(r, ownState, goal))
-		if view.supervision.Reason != "" {
-			status += " · " + view.supervision.Reason
-		}
+		status := coordinatorStatus(view, len(active), w.goalSuffix(r, ownState, goal))
 		supervision := view.supervision
 		out = append(out, w.withCaps(core.Session{
 			ID: r.ID, Title: r.Display(), Source: "workspace", Section: core.SectionWorkgroups,
