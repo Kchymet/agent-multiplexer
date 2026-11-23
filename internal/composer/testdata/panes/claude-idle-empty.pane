@@ -1,0 +1,23 @@
+# runtime: claude
+# size: 100x30
+# provenance: RECONSTRUCTED. The real Claude Code 2.1.263 screen CI captured
+#   (TestNativeClaudeTypedDelivery): banner, "❯"+NBSP prompt between two
+#   full-width rules, dim footer; plus a transcript and the auto-mode footer.
+# shows: idle, between turns, empty composer (cursor cell only)
+# want-state: free
+# want-busy: false
+# want-text: ""
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H ▐▛███▜▌   Claude Code v2.1.278
+▝▜█████▛▘  Sonnet 4.6 · API Usage Billing
+  ▘▘ ▝▝    /tmp/proj
+
+\x1b[48;5;237m❯ check the build\x1b[0m
+
+⏺ Done. The tests pass.
+
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[38;5;244m❯\x1b[0m \x1b[7m \x1b[0m
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[2m  ⏵⏵ auto mode on (shift+tab to cycle)\x1b[0m

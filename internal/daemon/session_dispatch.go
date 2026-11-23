@@ -255,8 +255,9 @@ func (r *sessionRuntime) actionResult(result core.Result) (sessionrpc.DispatchRe
 		return sessionrpc.DispatchResult{Status: sessionrpc.StatusFailed, Code: codeOpenPullRequests, Body: body}, nil
 	}
 	if !result.OK && result.Code == codeComposerBusy {
-		// "Not typed: the target's input box was not free" is built from fixed
-		// text only, and tells the caller the steer is safe to retry.
+		// "Not delivered: the target's input box was not free" is built from
+		// fixed text only. It says whether the steer was queued for automatic
+		// delivery (then it must not be resent) or may be retried.
 		return sessionrpc.DispatchResult{Status: sessionrpc.StatusFailed, Code: codeComposerBusy, Body: body}, nil
 	}
 	if !result.OK {

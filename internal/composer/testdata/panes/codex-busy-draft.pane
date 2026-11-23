@@ -1,0 +1,19 @@
+# runtime: codex
+# size: 100x28
+# provenance: RECONSTRUCTED from the REAL codex-real-busy-empty frame's layout
+#   (status row, blank rows, composer, footer), with a draft typed mid-turn.
+# shows: mid-turn ("esc to interrupt"), a person's draft in the composer
+# want-state: draft
+# want-busy: true
+# want-text: "also cover the polling case"
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H› Print 100 numbered conversation lines
+
+• Working \x1b[2m(4s • esc to interrupt)\x1b[0m
+
+
+› also cover the polling case
+
+\x1b[2m  gpt-5.6 default · /tmp/proj · ⠋\x1b[0m
+\x1b[2m  ? for shortcuts\x1b[0m

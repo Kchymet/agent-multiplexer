@@ -151,6 +151,16 @@ type Daemon struct {
 
 	// typedTiming overrides deliverTyped's waits (tests); zero uses the defaults.
 	typedTiming typedTiming
+	// typedLeft remembers amux text left unsent in a session's composer (by
+	// session id), so the next delivery recognizes and clears it rather than
+	// refusing it as the user's draft (typed_delivery.go).
+	typedLeftMu sync.Mutex
+	typedLeft   map[string]typedLeftover
+	// steerQueued marks the person steers waiting in each session's steer
+	// queue (verb + NUL + text), so a resend delivered directly cancels the
+	// queued copy and no text is delivered twice (steer_queue.go).
+	steerQueuedMu sync.Mutex
+	steerQueued   map[string]map[string]bool
 
 	// questionOpenFn, when non-nil, replaces the transcript read that decides
 	// whether typed steering must first dismiss an open question (tests).

@@ -311,7 +311,14 @@ func (r *sessionRuntime) startPass(ctx context.Context, id string) {
 	go func() {
 		defer r.passes.Done()
 		_, err := server.ServeOnce(ctx)
-		if err != nil && !errors.Is(err, sessionrpc.ErrQueueFull) && !errors.Is(err, sessionrpc.ErrClosed) {
+		switch {
+		case err == nil, errors.Is(err, sessionrpc.ErrQueueFull), errors.Is(err, sessionrpc.ErrClosed):
+		case errors.Is(err, sessionrpc.ErrResponseCapacity):
+			// Every wake of a saturated mailbox reports this; one summary line
+			// per session per interval (with the suppressed count) is enough.
+			// The 2026-11-22 incident logged ~1,400 of these a minute.
+			capacityLog.printf("capacity:"+id, "session RPC %s: %v", id, err)
+		default:
 			log.Printf("session RPC %s: %v", id, err)
 		}
 		close(done)
@@ -398,6 +405,7 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 	server, err := sessionrpc.OpenServerMailbox(session.ID, spec.Access.MailboxHostDir, r.d.authority, r.d.authority,
 		sessionrpc.Callbacks{Authorize: r.authorizeCallback, Dispatch: r.dispatchCallback},
 		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID), Slow: sessionCallSlow, Parallel: sessionCallParallel,
+			Priority:    sessionCallPriority,
 			SlowRequest: r.slowRequests.report})
 	if err != nil {
 		return err

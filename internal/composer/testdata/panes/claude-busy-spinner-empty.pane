@@ -1,0 +1,21 @@
+# runtime: claude
+# size: 100x30
+# provenance: RECONSTRUCTED from the real 2.1.263 CI screen (see README), with
+#   the 2.1 mid-turn spinner/status row and a tip line above the input box.
+# shows: mid-turn (model streaming), spinner + "esc to interrupt", empty composer
+# want-state: free
+# want-busy: true
+# want-text: ""
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H\x1b[48;5;237m❯ review the open PRs and keep going\x1b[0m
+
+⏺ Working on it — reading the PR list first.
+
+\x1b[38;5;174m✻\x1b[0m \x1b[38;5;174mWrangling…\x1b[0m \x1b[2m(12s · ↓ 340 tokens · esc to interrupt)\x1b[0m
+\x1b[2m  ⎿  Tip: press ctrl+t to show todos\x1b[0m
+
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[38;5;244m❯\x1b[0m \x1b[7m \x1b[0m
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[2m  ⏵⏵ auto mode on (shift+tab to cycle)\x1b[0m

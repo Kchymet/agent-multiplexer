@@ -332,6 +332,9 @@ func (d *Daemon) deliverPRWake(ctx context.Context, workgroup string, wakes []pr
 	if len(wakes) == 0 {
 		return results
 	}
+	if id, ok := steerQueueTarget(workgroup); ok {
+		return d.deliverQueuedSteers(ctx, id, wakes)
+	}
 	if items.IsGlobalInbox(workgroup) {
 		// Only item notices are addressed to the global inbox owner (items.go).
 		return d.deliverGlobalInboxWakes(ctx, wakes)

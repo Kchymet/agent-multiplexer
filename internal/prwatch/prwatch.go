@@ -96,6 +96,13 @@ const (
 	// blocked, or completed its goal. Workgroup and SessionID name the
 	// overseer; Text is the line it reads.
 	KindOverseer = "overseer"
+	// KindSteer is a person's typed steer (prompt/interject) the agent could not
+	// take when it was sent — its input box held a draft, a dialog was open, or
+	// the text could not be confirmed. SessionID names the target; Workgroup is
+	// the target's own steer queue ("steer:" + SessionID), so steers
+	// never mix with a coordinator's wake-ups; State is the verb and Text the
+	// text. Steers are delivered one by one, in order, never coalesced.
+	KindSteer = "steer"
 )
 
 // Member is one active workgroup member whose PRs are watched.
@@ -263,6 +270,10 @@ func (w *Watcher) Kick() {
 // the same member.
 func (w *Watcher) enqueueNotified(wake Wake, now time.Time) {
 	key := wake.Kind + "|" + wake.SessionID
+	if wake.Kind == KindSteer {
+		// Every steer is its own message; only an identical resend collapses.
+		key += "|" + wake.State + "|" + wake.Text
+	}
 	queue := w.pending[wake.Workgroup]
 	for i, p := range queue {
 		if p.key == key {

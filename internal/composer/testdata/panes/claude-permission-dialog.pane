@@ -1,0 +1,34 @@
+# runtime: claude
+# size: 100x30
+# provenance: RECONSTRUCTED (see README): the 2.1 Bash permission prompt, which
+#   replaces the input box while it is open (any draft is hidden, not lost).
+#   The transcript above holds a markdown rule/quote/rule block, which must not
+#   be read as a composer.
+# shows: mid-turn, permission dialog open in place of the composer
+# want-state: dialog
+# want-busy: false
+# want-text: ""
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H\x1b[48;5;237m❯ clean the build dir\x1b[0m
+
+⏺ Plan:
+  ────────────────────────────────
+  > remove build/ then rebuild
+  ────────────────────────────────
+
+⏺ \x1b[1mBash\x1b[0m(sleep 600)
+  ⎿  \x1b[2mWaiting…\x1b[0m
+
+\x1b[38;5;75m{{RULE}}\x1b[0m
+ \x1b[1mBash command\x1b[0m
+
+   sleep 600
+   \x1b[2mWait for the build\x1b[0m
+
+ Do you want to proceed?
+ \x1b[38;5;75m❯\x1b[0m \x1b[38;5;75m1. Yes\x1b[0m
+   2. Yes, and don't ask again for \x1b[1msleep\x1b[0m commands in /tmp/proj
+   3. No, and tell Claude what to do differently \x1b[2m(esc)\x1b[0m
+
+\x1b[2m Esc to cancel · Tab to amend · ctrl+e to explain\x1b[0m

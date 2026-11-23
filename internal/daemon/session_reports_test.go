@@ -57,8 +57,13 @@ func TestSessionReportVocabularyRejectsAuthorityAndPathFields(t *testing.T) {
 		{"caller id", access.Request{Route: access.RouteAction, Verb: sessionreport.Activity, ID: "other", Fields: map[string]string{
 			sessionreport.FieldRuntimeGeneration: "generation", sessionreport.FieldState: core.StateReady,
 		}}, false},
-		{"missing generation", access.Request{Route: access.RouteAction, Verb: sessionreport.Activity, Fields: map[string]string{
+		// Optional since 2026-11-22: a report without a generation applies to
+		// the current runtime (the client no longer round-trips report-context).
+		{"omitted generation", access.Request{Route: access.RouteAction, Verb: sessionreport.Activity, Fields: map[string]string{
 			sessionreport.FieldState: core.StateReady,
+		}}, true},
+		{"empty generation", access.Request{Route: access.RouteAction, Verb: sessionreport.Activity, Fields: map[string]string{
+			sessionreport.FieldState: core.StateReady, sessionreport.FieldRuntimeGeneration: " ",
 		}}, false},
 		{"path smuggling", access.Request{Route: access.RouteAction, Verb: sessionreport.Capture, Fields: map[string]string{
 			sessionreport.FieldRuntimeGeneration: "generation", sessionreport.FieldEvent: "Stop", "path": "/host/foreign",

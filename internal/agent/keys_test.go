@@ -28,9 +28,10 @@ func TestKeysPerKind(t *testing.T) {
 			InterruptOnlyWhileBusy: true,
 			TypedNewline:           []byte("\\\r"), TypeChunk: 256, TypeDelay: 5 * time.Millisecond, TypedTriggers: "/!", SubmitDelay: 100 * time.Millisecond,
 			DismissQuestion: []byte("\x1b"), DismissDelay: 300 * time.Millisecond,
+			Erase: []byte("\x7f"),
 		}},
 		{"codex", Keys{
-			Submit: []byte("\r"), Interrupt: []byte("\x1b"), Allow: []byte("y"), Deny: []byte("n"),
+			Submit: []byte("\r"), Interrupt: []byte("\x1b"), Allow: []byte("y"), Deny: []byte("n"), Erase: []byte("\x7f"),
 		}},
 	}
 	for _, c := range cases {

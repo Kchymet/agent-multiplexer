@@ -1,0 +1,20 @@
+# runtime: codex
+# size: 100x28
+# provenance: RECONSTRUCTED from the REAL codex-real-busy-empty frame's layout,
+#   with a queued follow-up preview ("↳") above the composer.
+# shows: mid-turn, a queued message preview, empty composer (dim placeholder)
+# want-state: free
+# want-busy: true
+# want-text: ""
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H› Print 100 numbered conversation lines
+
+• Working \x1b[2m(9s • esc to interrupt)\x1b[0m
+  ↳ check PR 7 next
+\x1b[2m    ⌥ + ↑ edit\x1b[0m
+
+› \x1b[2mAsk Codex to do anything\x1b[0m
+
+\x1b[2m  gpt-5.6 default · /tmp/proj · ⠙\x1b[0m
+\x1b[2m  ? for shortcuts\x1b[0m
