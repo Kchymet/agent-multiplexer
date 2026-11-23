@@ -10,6 +10,7 @@ commands:
   status     print workgroups and their agents, then exit
   top        per-session CPU/memory, top processes and amux's own overhead
   queue      the user question queue: list, answer, dismiss, acknowledge  (alias: q)
+  question   answer agents' questions with every feature of their own dialog
   do         drive one daemon control action (the scripting entrypoint)
   refresh    ask the daemon to re-poll its sources now
   doctor     health check: versions, compatibility, dependencies and runtime  (alias: health, check)

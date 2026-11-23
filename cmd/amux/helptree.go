@@ -49,6 +49,7 @@ direct members).`,
 				Examples: []string{"amux top", "amux top --mem -n 0"},
 			},
 			queueSpec(),
+			questionSpec(),
 			doSpec(),
 			{
 				Name: "refresh", run: func([]string) error { return cmdRefresh() },
@@ -313,6 +314,27 @@ member/PR awaited and the wake-up; it must cover every open member PR.`},
 			{Name: "blocked", Args: `"<reason>"`, Summary: "a repeating blocker only the user can clear"},
 			{Name: "prompt", Hidden: true, Args: "--hook", Summary: "internal: the generated Claude prompt hook"},
 			{Name: "stop", Hidden: true, Args: "--hook", Summary: "internal: the generated Claude stop hook"},
+		},
+	}
+}
+
+func questionSpec() *cmdSpec {
+	return &cmdSpec{
+		Name: "question", Args: "[<command>]", run: cmdQuestion,
+		Summary: "answer agents' questions with every feature of their own dialog",
+		Detail: `Agents' structured questions (Claude AskUserQuestion, Codex request-user-input)
+from every session: per-question selections, "Other" free text, notes, dismissal
+with or without a reply, and handing a held question back to the agent's pane.
+Answering is the user's alone (host terminal). Exit codes: 3 already answered,
+4 no longer open, 5 not deliverable (answer in the pane), 6 needs a newer client.`,
+		Sub: []*cmdSpec{
+			{Name: "list", Aliases: []string{"ls"}, Args: "[--all] [--json]", Summary: "open questions with their options (the default)"},
+			{Name: "show", Args: "<id> [--json]", Summary: "one question in full, option previews included"},
+			{Name: "answer", Args: "<id> [--q <n|id|header>] [--select <label|n>]... [--other <text|->] [--note <text>] ...",
+				Summary: "answer every question; --q starts each question's group (optional for one question)",
+				Detail: "--select takes an exact option label or a 1-based option number and repeats for a multi-select. --other gives free text (- reads stdin). --note attaches a note where the question takes one."},
+			{Name: "cancel", Aliases: []string{"dismiss"}, Args: "<id> [--message <text>]", Summary: "dismiss the question, optionally with a reply to the agent"},
+			{Name: "release", Args: "<id>", Summary: "hand a held Claude question back to the agent's pane, to answer it there"},
 		},
 	}
 }

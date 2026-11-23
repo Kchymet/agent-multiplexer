@@ -639,6 +639,10 @@ func runCLI(args []string, stdout, stderr io.Writer, isTTY func() bool) int {
 			return 2
 		}
 		fmt.Fprintln(stderr, "amux:", err)
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) {
+			return coded.ExitCode()
+		}
 		return 1
 	}
 	return 0
