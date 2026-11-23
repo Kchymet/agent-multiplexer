@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"amux/internal/agent"
@@ -147,19 +148,30 @@ func sandboxDrift(args []string) error {
 	if err != nil {
 		return err
 	}
-	var rows []driftRow
+	type ref struct {
+		id   string
+		spec cfghome.Spec
+	}
+	var refs []ref
+	var specs []cfghome.Spec
 	for _, sa := range agents {
 		for _, spec := range sa.specs {
-			changes, err := cfghome.Scan(spec)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "amux sandbox: %s (%s): %v\n", sa.s.ID, spec.Kind, err)
-				continue
-			}
-			if len(changes) == 0 && id == "" {
-				continue
-			}
-			rows = append(rows, driftRow{Agent: sa.s.ID, Kind: spec.Kind, Copy: spec.Dir, Changes: changes})
+			refs = append(refs, ref{sa.s.ID, spec})
+			specs = append(specs, spec)
 		}
+	}
+	progress := driftProgress(asJSON, os.Stderr, isTerminal(os.Stderr))
+	results := cfghome.ScanAll(specs, cfghome.ScanOptions{Progress: progress})
+	var rows []driftRow
+	for i, r := range results {
+		if r.Err != nil {
+			fmt.Fprintf(os.Stderr, "amux sandbox: %s (%s): %v\n", refs[i].id, refs[i].spec.Kind, r.Err)
+			continue
+		}
+		if len(r.Changes) == 0 && id == "" {
+			continue
+		}
+		rows = append(rows, driftRow{Agent: refs[i].id, Kind: refs[i].spec.Kind, Copy: refs[i].spec.Dir, Changes: r.Changes})
 	}
 	if asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -237,26 +249,53 @@ func sandboxPath(args []string) error {
 
 // sandboxDriftSummary counts agent/path differences awaiting a decision, not
 // editing actions. Query or scan failures must not be reported as a clean check.
-func sandboxDriftSummary() (agents, edits int, err error) {
+// Archived agents are included on purpose: archiving keeps the copy and its
+// manifest, `amux sandbox promote/reset <id>` still resolves the archived id,
+// and the agent can be restored — their edits stay actionable until the agent
+// is deleted.
+func sandboxDriftSummary(progress func(done, total int)) (agents, edits int, err error) {
 	all, err := sandboxAgents("")
 	if err != nil {
 		return 0, 0, err
 	}
+	var specs []cfghome.Spec
 	for _, sa := range all {
-		n := 0
-		for _, spec := range sa.specs {
-			changes, err := cfghome.Scan(spec)
-			if err != nil {
-				return 0, 0, fmt.Errorf("%s (%s): %w", sa.s.ID, spec.Kind, err)
+		// Each harness's spec carries the session id as AgentID, which is how
+		// DriftSummary labels errors and groups an agent's specs.
+		specs = append(specs, sa.specs...)
+	}
+	return cfghome.DriftSummary(specs, cfghome.ScanOptions{Progress: progress})
+}
+
+// driftProgress is `amux sandbox drift`'s progress on stderr: none with --json,
+// whose consumers read a clean machine-readable stream.
+func driftProgress(asJSON bool, w io.Writer, tty bool) func(done, total int) {
+	if asJSON {
+		return nil
+	}
+	return scanProgress(w, tty, "scanning config copies")
+}
+
+// scanProgress returns a Progress callback so a slow comparison over many
+// agents is visibly working rather than hung. On a terminal it keeps one
+// "label N/M" status line updated and erases it when the last scan is done;
+// elsewhere (a log, a wrapper capturing output) it writes one plain line when
+// scanning starts and no escape codes.
+func scanProgress(w io.Writer, tty bool, label string) func(done, total int) {
+	if !tty {
+		return func(done, total int) {
+			if done == 0 {
+				fmt.Fprintf(w, "  … %s (%d)\n", label, total)
 			}
-			n += cfghome.Pending(changes)
-		}
-		if n > 0 {
-			agents++
-			edits += n
 		}
 	}
-	return agents, edits, nil
+	return func(done, total int) {
+		if done >= total {
+			fmt.Fprint(w, "\r\033[K")
+			return
+		}
+		fmt.Fprintf(w, "\r\033[K  … %s %d/%d", label, done, total)
+	}
 }
 
 // plural is the "s" suffix for a count other than one.

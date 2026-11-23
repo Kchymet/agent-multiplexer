@@ -464,6 +464,18 @@ func (t *Terminal) Indicator() string {
 	return fmt.Sprintf(" ↑ %d/%d ", t.offset, t.historyLen())
 }
 
+// Capture renders an output stream into a fresh cols×rows screen and returns
+// its snapshot: what a client attaching to a pane with exactly that stream
+// would paint. The emulator's replies to queries in the stream are discarded.
+// It is synchronous, for fixtures and one-off reads; a live pane is mirrored
+// with NewRemote and Feed instead.
+func Capture(stream []byte, cols, rows int) Snapshot {
+	t := NewRemote(cols, rows, nil, nil)
+	defer t.Close()
+	t.ingest(stream)
+	return t.Snapshot()
+}
+
 // Snapshot copies the cells the viewport currently shows; see the type.
 func (t *Terminal) Snapshot() Snapshot {
 	t.mu.Lock()

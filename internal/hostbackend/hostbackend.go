@@ -95,6 +95,34 @@ func (HostDaemon) ConnectContext(ctx context.Context) (*daemon.Client, error) {
 	return daemon.DialContext(ctx)
 }
 
+// Enrichments lists the session enrichment kinds the daemon publishes and
+// each source's freshness (none from a daemon that predates them, or a test
+// connection that cannot answer).
+func (h HostDaemon) Enrichments(ctx context.Context) (Enrichments, error) {
+	return call(ctx, h, func(c Conn) (Enrichments, error) {
+		ec, ok := c.(interface {
+			Enrichments() ([]string, []hp.EnrichmentSource, error)
+		})
+		if !ok {
+			return Enrichments{}, nil
+		}
+		kinds, sources, err := ec.Enrichments()
+		return Enrichments{Kinds: kinds, Sources: sources}, err
+	})
+}
+
+// EnrichmentKinds lists the session enrichment kinds the daemon publishes.
+func (h HostDaemon) EnrichmentKinds(ctx context.Context) ([]string, error) {
+	e, err := h.Enrichments(ctx)
+	return e.Kinds, err
+}
+
+// Enrichments is the daemon's enrichment capability.
+type Enrichments struct {
+	Kinds   []string
+	Sources []hp.EnrichmentSource
+}
+
 // Snapshot returns the daemon's current session inventory.
 func (h HostDaemon) Snapshot(ctx context.Context) ([]core.Session, error) {
 	return call(ctx, h, func(c Conn) ([]core.Session, error) { return c.Snapshot() })

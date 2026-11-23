@@ -90,7 +90,11 @@ const (
 	// the last observation in human words, `wake` whether the coordinator was
 	// sent a wake-up for it.
 	TypePRState = "pr_state" // meta: {session, pr: SessionPR, changes: [string], wake}
-	TypeRaw     = "raw"      // out: {runtime, native_type, body}  (never dropped)
+	// TypeEnrichmentState is a transition of an enrichment item of any kind
+	// other than pull_request (PRs keep TypePRState):
+	// meta: {session, kind, id, changes: [string], enrichment: Enrichment}.
+	TypeEnrichmentState = "enrichment_state"
+	TypeRaw             = "raw" // out: {runtime, native_type, body}  (never dropped)
 )
 
 // Notice categories (the optional `category` of a TypeNotice payload). A

@@ -305,7 +305,12 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		// Engine-only like start: it drives the agent inside a running session and
 		// changes no store state, so it never reaches wsops.
 		if err := d.steer(ctx, a); err != nil {
-			return fail("%v", err)
+			r := fail("%v", err)
+			var busy *composerBusyError
+			if errors.As(err, &busy) {
+				r.Code = codeComposerBusy
+			}
+			return r
 		}
 		return ok()
 	default:

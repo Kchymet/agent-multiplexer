@@ -254,6 +254,11 @@ func (r *sessionRuntime) actionResult(result core.Result) (sessionrpc.DispatchRe
 		// the caller needs those URLs to act on it.
 		return sessionrpc.DispatchResult{Status: sessionrpc.StatusFailed, Code: codeOpenPullRequests, Body: body}, nil
 	}
+	if !result.OK && result.Code == codeComposerBusy {
+		// "Not typed: the target's input box was not free" is built from fixed
+		// text only, and tells the caller the steer is safe to retry.
+		return sessionrpc.DispatchResult{Status: sessionrpc.StatusFailed, Code: codeComposerBusy, Body: body}, nil
+	}
 	if !result.OK {
 		// Host-side action failures can contain filesystem details. Restricted
 		// callers receive a stable code only and never a raw daemon error string.

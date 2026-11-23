@@ -103,7 +103,19 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 			return nil // stopped or mid-turn: the next turn's Stop hook continues it
 		}
 		verb = core.SteerPrompt
-		a.Fields = map[string]string{core.SteerVerb: verb, core.SteerText: claudegoal.ResumePrompt}
+		a.Fields = map[string]string{core.SteerVerb: verb, core.SteerText: claudegoal.ResumePrompt, steerOriginField: steerOriginAmux}
+		// The goal is resumed either way. If the composer is not free the nudge
+		// is not typed: the user is at the keyboard, and their next prompt
+		// continues the goal.
+		if err := d.steerPTY(ctx, a, verb, h, sess); err != nil {
+			var busy *composerBusyError
+			if errors.As(err, &busy) {
+				journal(a.ID, core.JournalInfo, "goal resumed; amux did not type its nudge: "+err.Error())
+				return nil
+			}
+			return err
+		}
+		return nil
 	}
 
 	// Structured control (AGE-181): a Codex session under the App Server supervisor
@@ -144,6 +156,11 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 	if verb == core.SteerGoal {
 		return fmt.Errorf("goal: agent %s has no supervised runtime to hold a goal (start it first)", a.ID)
 	}
+	return d.steerPTY(ctx, a, verb, h, sess)
+}
+
+// steerPTY serves a verb by keystroke to the agent pane's PTY.
+func (d *Daemon) steerPTY(ctx context.Context, a core.Action, verb string, h agent.Harness, sess store.Session) error {
 	keys := h.Keys()
 	if !keys.Steerable() {
 		return fmt.Errorf("agent kind %q has no steering keys", agent.Canonical(sess.Agent))
@@ -184,21 +201,20 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 			})
 		}
 		if verb == core.SteerPrompt || verb == core.SteerInterject {
-			// A question selector (Claude's AskUserQuestion) owns the keyboard
-			// while it is up: typed text would drive the selector and Submit
-			// would pick its focused option, so a remote client's typed answer
-			// never reached the agent. Dismiss it first; the text then lands in
-			// the composer as the user's reply.
-			if len(keys.DismissQuestion) > 0 && d.questionOpen(h, sess) {
-				payload = dismissingQuestion(keys, payload)
-			}
-			// "Up" is not "booted". Creation auto-starts the agent, so a remote
-			// client's prompt that follows its add-agent/new-workgroup finds a
-			// runtime launched milliseconds ago, and a Claude Code that is still
-			// painting drops the submit key: the text never runs. Hold typed text
-			// until the runtime is as old as the cold-start settle; an agent that
-			// booted long ago is not delayed at all.
-			d.holdUntilBooted(payload)
+			// Typed text goes through the one safe delivery path, which never
+			// mixes it with a draft in the composer (typed_delivery.go). It also
+			// dismisses a question selector (Claude's AskUserQuestion) first: while
+			// one is up, typed text would drive the selector and Submit would pick
+			// its focused option, so a remote client's typed answer never reached
+			// the agent. And "up" is not "booted": creation auto-starts the agent,
+			// so a remote client's prompt that follows its add-agent/new-workgroup
+			// finds a runtime launched milliseconds ago, and a Claude Code that is
+			// still painting drops the submit key; typed text is held until the
+			// runtime is as old as the cold-start settle.
+			return d.deliverTyped(ctx, typedRequest{
+				harness: h, session: sess, instance: in, keys: keys, payload: payload,
+				text: a.Fields[core.SteerText], automated: a.Fields[steerOriginField] == steerOriginAmux,
+			})
 		}
 		in.InputSequence(payload)
 		return nil
@@ -476,6 +492,10 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 		if !ok {
 			return fmt.Errorf("agent %s did not come up", id)
 		}
+		// This is the one typed path that skips deliverTyped's composer check: the
+		// runtime was started for this very prompt, so its composer holds no one's
+		// draft (and has not been painted yet to read).
+		//
 		// The runtime is a TUI that has to boot before it will accept typed input,
 		// so reserve a delay in the input FIFO instead of sleeping here. Queueing is
 		// the exact bounded effect and occurs under final admission; the later delay

@@ -14,7 +14,7 @@ func TestCoordinatorIdleMemberRunningIsRunning(t *testing.T) {
 	for _, own := range []string{core.StateReady, core.StateIdle, core.StateUnknown} {
 		v := superviseCoordinator(own, "", "", []memberView{
 			member("m1", "a", core.StateRunning), member("m2", "b", core.StateRunning),
-		})
+		}, watching())
 		if v.state != core.StateRunning || v.lead != core.StateRunning || len(v.supervision.NeedsYou) != 0 {
 			t.Fatalf("own %s: state/lead/needsYou = %q/%q/%v, want running", own, v.state, v.lead, v.supervision.NeedsYou)
 		}
@@ -66,7 +66,7 @@ func TestWorkgroupRollupMatrix(t *testing.T) {
 			for i, st := range tc.members {
 				ms = append(ms, member(fmt.Sprintf("id%d", i), fmt.Sprintf("m%d", i), st))
 			}
-			v := superviseCoordinator(tc.own, tc.goal, "", ms)
+			v := superviseCoordinator(tc.own, tc.goal, "", ms, watching())
 			if v.state != tc.state {
 				t.Errorf("state = %q, want %q", v.state, tc.state)
 			}

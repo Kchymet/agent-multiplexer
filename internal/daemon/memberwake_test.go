@@ -58,14 +58,8 @@ func (d *Daemon) setRows(rows []core.Session) {
 func TestMemberFinishWakesCoordinator(t *testing.T) {
 	d, in, root, member, _ := prWakeFixture(t)
 	d.prs = prwatch.New(prwatch.Config{
-		Run:     func(context.Context, ...string) ([]byte, error) { return nil, nil },
-		Members: func() ([]prwatch.Member, error) { return nil, nil },
-		Load:    func() (map[string]string, error) { return nil, nil },
-		Save:    func(string, string) error { return nil },
-		Emit:    func(prwatch.Change) {},
 		Deliver: d.deliverPRWake,
 		Window:  20 * time.Millisecond,
-		NoPoll:  true,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -87,7 +81,8 @@ func TestMemberFinishWakesCoordinator(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	text := in.written()
-	if !strings.Contains(text, claudegoal.Marker+" Workgroup update") {
+	// The marker is typed on a line of its own (Claude's newline is backslash+Enter).
+	if !strings.HasPrefix(text, claudegoal.Marker+"\\\r") || !strings.Contains(text, "Workgroup update") {
 		t.Fatalf("wake %q lacks the goal marker / workgroup header", text)
 	}
 	goal := claudegoal.State{Objective: "ship", Status: claudegoal.StatusWaiting, Note: "m1", Created: 1}

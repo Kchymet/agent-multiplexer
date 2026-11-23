@@ -20,11 +20,6 @@ func newNotifyHarness(t *testing.T, window time.Duration) *notifyHarness {
 	t.Helper()
 	h := &notifyHarness{verdict: Delivered, called: make(chan struct{}, 16)}
 	h.w = New(Config{
-		Run:     func(context.Context, ...string) ([]byte, error) { t.Fatal("NoPoll watcher ran gh"); return nil, nil },
-		Members: func() ([]Member, error) { t.Fatal("NoPoll watcher listed members"); return nil, nil },
-		Load:    func() (map[string]string, error) { return nil, nil },
-		Save:    func(string, string) error { return nil },
-		Emit:    func(Change) {},
 		Deliver: func(_ context.Context, _ string, wakes []Wake) []Delivery {
 			h.mu.Lock()
 			h.calls = append(h.calls, append([]Wake(nil), wakes...))
@@ -39,7 +34,6 @@ func newNotifyHarness(t *testing.T, window time.Duration) *notifyHarness {
 		},
 		Logf:   t.Logf,
 		Window: window,
-		NoPoll: true,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
