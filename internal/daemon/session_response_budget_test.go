@@ -421,3 +421,27 @@ func publishDaemonCall(t *testing.T, authority *access.FileAuthority, grant acce
 		t.Fatal(err)
 	}
 }
+
+// TestDaemonResponseBudgetAdmitsMultiSessionHerd pins the 2026-11-22 livelock
+// fix: the daemon-wide budget is shared by every session, so it must admit a
+// restart herd of worst-case in-flight reservations from many sessions at once.
+// Sized for one session (128 files, 8 MiB), it admitted only ~87 worst-case
+// reservations daemon-wide and starved credential-read for every agent.
+func TestDaemonResponseBudgetAdmitsMultiSessionHerd(t *testing.T) {
+	budget := newSessionResponseBudget()
+	const sessions, perSession = 25, 12 // ~300 concurrent in-flight calls
+	worstCase := sessionrpc.MaxResponseBytes / int64(sessionrpc.MaxResponseFiles) * 11
+	if worstCase <= 0 {
+		t.Fatal("bad worst-case size")
+	}
+	for s := 0; s < sessions; s++ {
+		for r := 0; r < perSession; r++ {
+			subject := "s" + strings.Repeat("x", s%3) + string(rune('a'+s))
+			request := subject + "-r" + string(rune('a'+r))
+			reserveTestResponse(t, budget, subject, request, worstCase, true, false)
+		}
+	}
+	if got, limit := sessions*perSession, sessionrpc.MaxResponseFiles; got <= limit {
+		t.Fatalf("test herd (%d) must exceed the per-session limit (%d) to be meaningful", got, limit)
+	}
+}
