@@ -268,7 +268,11 @@ amux launches the one on your PATH. Override the launch binary per harness with
 in the environment that starts the daemon, then restart it; changing another
 shell's environment does not reconfigure a running daemon. Claude agents launch
 **pre-trusted** and with `--permission-mode auto` (Claude's automatic approval
-classifier); override with `AMUX_PERMISSION_MODE`. Automatic review can approve
+classifier); override with `AMUX_PERMISSION_MODE`. amux also pre-answers Claude's
+first-run and auto-mode onboarding dialogs (`hasCompletedOnboarding`,
+`skipAutoPermissionPrompt`, `autoMode.environment`), so an unattended agent never
+stops on one. See
+[Unattended launch](docs/sandbox-config.md#unattended-launch-pre-answered-dialogs). Automatic review can approve
 actions and is not a guarantee that an action is safe. See
 `scripts/claude-launch.example.sh`. Codex agents launch pre-trusted (project trust
 written to the agent's private copy of `config.toml`) with **Approve for me**

@@ -1,6 +1,7 @@
 package claudecfg
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -224,5 +225,53 @@ func TestFindSessionWithUnderscores(t *testing.T) {
 	}
 	if _, err := os.Stat(home.TranscriptPath(cwd, id)); err != nil {
 		t.Fatalf("transcript lookup: %v", err)
+	}
+}
+
+// TestUnattendedSettingNamesContract pins the Claude Code setting and state names
+// amux writes so an unattended agent never stops on an auto-mode dialog (see
+// unattended.go). A rename here is a deliberate change; an upstream rename is
+// caught by the binary check below, which runs wherever a Claude Code binary is
+// available (CLAUDE_CODE_EXECPATH inside a Claude session, or AMUX_CLAUDE_BIN).
+func TestUnattendedSettingNamesContract(t *testing.T) {
+	names := map[string]string{
+		SkipAutoPermissionPromptKey: "skipAutoPermissionPrompt",
+		AutoModeKey:                 "autoMode",
+		AutoModeEnvironmentKey:      "environment",
+		AutoModeDefaults:            "$defaults",
+		HasCompletedOnboardingKey:   "hasCompletedOnboarding",
+		PermissionModeEnv:           "AMUX_PERMISSION_MODE",
+	}
+	for got, want := range names {
+		if got != want {
+			t.Errorf("setting name = %q, want %q", got, want)
+		}
+	}
+
+	bin := os.Getenv("AMUX_CLAUDE_BIN")
+	if bin == "" {
+		bin = os.Getenv("CLAUDE_CODE_EXECPATH")
+	}
+	if bin == "" {
+		t.Skip("no Claude Code binary (set AMUX_CLAUDE_BIN): upstream-name check skipped")
+	}
+	b, err := os.ReadFile(bin)
+	if err != nil {
+		t.Skipf("cannot read Claude Code binary %s: %v", bin, err)
+	}
+	// Each name as Claude's own source spells it: the schema key and the gate
+	// that reads it.
+	for _, needle := range []string{
+		`skipAutoPermissionPrompt:`,       // settings schema key (opt-in accepted)
+		`?.skipAutoPermissionPrompt===!0`, // the auto-mode entry-warning gate
+		`autoMode:`,                       // settings schema key
+		`?.environment?.length`,           // env-onboarding gate: non-empty environment
+		`"$defaults"`,                     // splice marker for built-in entries
+		`hasCompletedOnboarding`,          // first-run onboarding state flag
+		`hasTrustDialogAccepted`,          // folder trust state flag (TrustDir)
+	} {
+		if !bytes.Contains(b, []byte(needle)) {
+			t.Errorf("Claude Code binary %s no longer contains %q: an unattended-launch setting may have been renamed upstream", bin, needle)
+		}
 	}
 }
