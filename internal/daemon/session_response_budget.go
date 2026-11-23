@@ -41,11 +41,27 @@ type sessionResponseLeaseState struct {
 	released      bool
 }
 
+// daemonResponseSessions sizes the daemon-wide response budget for this many
+// sessions' worth of full per-session queues. Each mailbox still enforces its
+// own MaxResponseFiles / MaxResponseBytes (Server.ensureResponseCapacity), so
+// on-disk usage stays bounded per session; this budget only bounds aggregate
+// amplification across sessions.
+//
+// It used to be sized for ONE session (128 files, 8 MiB) while being shared by
+// every session. Each in-flight request reserves the worst-case envelope
+// (~93 KiB) until commit, so only ~87 requests could be in flight across the
+// whole daemon. With ~25 agents reporting hooks and status lines (~180 calls a
+// minute), a restart herd filled it; deferred clients timed out after 10s;
+// their uncollected responses then held slots until MaxResponseAge (60s), so
+// the budget never drained and credential-read starved for every agent
+// (incident 2026-11-22, daemon livelock).
+const daemonResponseSessions = 32
+
 func newSessionResponseBudget() *sessionResponseBudget {
 	return newSessionResponseBudgetWithLimits(
-		sessionrpc.MaxResponseFiles,
-		sessionrpc.MaxResponseBytes,
-		sessionrpc.MaxPendingReceipts,
+		sessionrpc.MaxResponseFiles*daemonResponseSessions,
+		sessionrpc.MaxResponseBytes*daemonResponseSessions,
+		sessionrpc.MaxPendingReceipts*daemonResponseSessions,
 	)
 }
 
