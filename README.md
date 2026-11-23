@@ -225,6 +225,12 @@ interchangeable, and the names are older than the vocabulary above — so:
   in its first column (workgroups flush left, their agents indented).
 - **The conversation id** is a uuid and belongs to the harness, not to amux. It
   never appears as a CLI `<id>`; it appears in transcript paths.
+- **The broker id** names the amux host itself (persisted in
+  `~/.local/share/amux/broker-id`, derived from the short hostname on first use,
+  overridable with `AMUX_BROKER_ID`). It is the middle segment of every agent
+  branch, `amux/<broker>/<workgroup>-<agent>`, so machines sharing a GitHub repo
+  never collide and each one's PR watcher claims only its own PRs. See
+  [branch names](docs/branches.md).
 
 So: an id from `amux workgroup ls` addresses something in the rail — pass it to
 `amux workgroup …` or `amux do …`. A uuid addresses a transcript. If a command
@@ -471,7 +477,7 @@ amux workgroup create <repo>...  # workgroup limited to those repos, with a firs
 amux workgroup move <agent> [<root>|--new]  # into another workgroup, or a new one of its own
 amux workgroup archive | unarchive <id>
 amux workgroup rm|rename|ls
-#   archive/rm (and `amux agent done`) refuse while the session's amux/<wg>-<member>*
+#   archive/rm (and `amux agent done`) refuse while the session's amux/<broker>/<wg>-<member>*
 #   branches still head an open PR; finish or close it, or pass --force (host).
 #   If gh is unavailable or errors, the check is skipped with a warning.
 amux status [--json]       # print rail state as text (--json for the raw snapshot)
@@ -728,7 +734,7 @@ at daemon start). See [goal mode](docs/default-sessions.md#goal-mode).
 ### PR watch
 
 The daemon tracks the GitHub PRs each workgroup member owns (head branch
-`amux/<wg>-<member>[-suffix]`) with the host's `gh` login, one `gh pr list` per
+`amux/<broker>/<wg>-<member>[-suffix]`; see [branch names](docs/branches.md)) with the host's `gh` login, one `gh pr list` per
 repository every 3 minutes (`AMUX_PR_POLL_INTERVAL`, `off` to disable). Members'
 rows in `amux status --json` carry a `prs` list, every change is a `pr_state`
 event in `amux agent events <member>`, and a meaningful transition (CI red, CI

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -288,16 +289,18 @@ func cmdDoctor() error {
 // branchRef is one amux/* branch found in a repo's bare clone.
 type branchRef struct{ Repo, Branch string }
 
-// reconcileSessions compares the store's sessions (fetched via the daemon) with
-// what's on disk — the worktree dirs under SessionsDir and the amux/* branches in
-// each repo — and prints drift in both directions. Reads only through the daemon's
-// session model, never the store.
+// reconcileSessions compares the sessions the daemon reports with what's on
+// disk — each session's stored directory, the session dirs under SessionsDir
+// and the amux/* branches in each repo — and prints drift in both directions.
+// Reads only through the daemon's session model, never the store.
 func reconcileSessions(ctx context.Context, repos []core.RepoRow, roots []core.WorkgroupRow) error {
 	var disk []branchRef
 	var inventoryErrs []error
 	for _, repo := range repos {
 		gitDir := filepath.Join(core.ReposDir(), repo.Name+".git")
-		branches, err := git.ListBranchesE(ctx, gitDir, core.BranchPrefix+"*")
+		// A prefix, not the glob "amux/*": a glob stops at "/" and would miss
+		// amux/<broker>/… branches.
+		branches, err := git.ListBranchesE(ctx, gitDir, core.BranchPrefix)
 		if err != nil {
 			fmt.Printf("  ✗ agents    could not inspect branch inventory for %s: %v\n", repo.Name, err)
 			inventoryErrs = append(inventoryErrs, fmt.Errorf("inspect %s branch inventory: %w", repo.Name, err))
@@ -307,21 +310,25 @@ func reconcileSessions(ctx context.Context, repos []core.RepoRow, roots []core.W
 			disk = append(disk, branchRef{Repo: repo.Name, Branch: b})
 		}
 	}
-	orphanDirs, missingDirs, orphanBranches := reconcile(core.SessionsDir(), roots, disk)
+	res := reconcile(core.SessionsDir(), roots, disk)
+	if res.Restricted {
+		fmt.Printf("  · agents    this view omits session directories; run amux doctor on the host to reconcile\n")
+		return errors.Join(inventoryErrs...)
+	}
 
-	if len(orphanDirs)+len(missingDirs)+len(orphanBranches) == 0 && len(inventoryErrs) == 0 {
+	if res.empty() && len(inventoryErrs) == 0 {
 		fmt.Printf("  ✓ agents    store and disk agree\n")
 		return nil
 	}
-	printCapped("agent directory not tracked by amux", orphanDirs, func(d string) string {
+	printCapped("agent directory not tracked by amux", res.OrphanDirs, func(d string) string {
 		return filepath.Join(core.SessionsDir(), d)
 	})
-	printCapped("tracked agent missing its directory", missingDirs, func(s string) string { return s })
-	printCapped("branch not linked to a tracked agent", orphanBranches, func(s string) string { return s })
-	if len(missingDirs) > 0 {
+	printCapped("tracked session missing its directory", res.MissingDirs, func(s string) string { return s })
+	printCapped("branch not linked to a tracked agent", res.OrphanBranches, func(s string) string { return s })
+	if len(res.MissingDirs) > 0 {
 		fmt.Println("  Missing directories can prevent agents from resuming. Check moved/deleted paths with: amux workgroup ls")
 	}
-	if len(orphanDirs)+len(orphanBranches) > 0 {
+	if len(res.OrphanDirs)+len(res.OrphanBranches) > 0 {
 		fmt.Println("  Untracked items may contain work you want to keep. Inspect files and unmerged commits before removing them.")
 	}
 	if len(inventoryErrs) > 0 {
@@ -344,81 +351,174 @@ func printCapped(label string, items []string, render func(string) string) {
 	}
 }
 
+// reconcileResult is the drift found in each direction, each list sorted.
+type reconcileResult struct {
+	// Restricted reports that the rows came from a scoped (non-host) view that
+	// omits stored directories, so store/disk agreement cannot be determined.
+	// When set, the drift lists are empty.
+	Restricted bool
+	// OrphanDirs are session-shaped directories (a child of a top-level dir
+	// under the sessions dir) that no tracked session owns, relative to it.
+	OrphanDirs []string
+	// MissingDirs describe tracked sessions — members and root sessions such
+	// as coordinators and repo homes, archived or not — whose stored directory
+	// is not a directory on disk.
+	MissingDirs []string
+	// OrphanBranches are amux/* branches ("repo · branch") linked to no
+	// tracked member.
+	OrphanBranches []string
+}
+
+func (r reconcileResult) empty() bool {
+	return len(r.OrphanDirs)+len(r.MissingDirs)+len(r.OrphanBranches) == 0
+}
+
+// trackedDir is a session that owns a directory, for missing-dir reports.
+type trackedDir struct{ id, label, dir string }
+
 // reconcile is the pure core of the session reconciliation: given the sessions
-// dir, the known workgroups, and the amux/* branches found on disk, it returns the
-// drift in each direction (sorted). Worktree dirs are matched by agent id (the
-// dir's leaf name), so an agent moved to another workgroup — whose dir still lives
-// under its original root — is recognized rather than flagged. Branches are
-// matched against each agent's stored branch (core.AgentRow.Branch), so a branch
-// left behind by a deleted agent surfaces even if the scheme later changes.
-func reconcile(sessionsDir string, roots []core.WorkgroupRow, disk []branchRef) (orphanDirs, missingDirs, orphanBranches []string) {
+// dir, the daemon's QuerySessions rows, and the amux/* branches found on disk,
+// it returns the drift in each direction.
+//
+// Directories are matched by the exact Dir each session stores, as the daemon
+// reports it — never re-derived from ids. The layout has changed over time: a
+// member keeps its directory under its original workgroup after a move, a
+// coordinator lives in a "coordinator" child of its workgroup container, and a
+// legacy root (or repo home) owns the container itself, holding its own
+// worktrees beside any member dirs. The stored Dir is what stays authoritative
+// across all of them.
+//
+// Archived sessions are tracked like live ones: archiving keeps the row and the
+// directory (it is reversible), so archived members and an archived workgroup's
+// children still own their dirs, and a vanished dir still blocks a restore.
+func reconcile(sessionsDir string, roots []core.WorkgroupRow, disk []branchRef) reconcileResult {
+	byDir := map[string]trackedDir{} // cleaned stored Dir -> owner
+	ownsContainer := map[string]bool{}
+	legacy := map[string]trackedDir{} // members with no stored Dir, by id
 	knownAgent := map[string]bool{}
 	knownBranch := map[string]bool{}
 	for _, wg := range roots {
+		if wg.Role != "" {
+			// A root with a role has a session of its own, and the host read
+			// model always reports where it lives. A blank Dir means a scoped
+			// view that hides physical paths: nothing here can be trusted.
+			if wg.Dir == "" {
+				return reconcileResult{Restricted: true}
+			}
+			dir := filepath.Clean(wg.Dir)
+			byDir[dir] = trackedDir{id: wg.ID, label: wg.Role, dir: dir}
+			// A legacy root (or repo home) is its container: whatever else sits
+			// there is that session's own content, not a member.
+			ownsContainer[dir] = true
+		}
 		for _, a := range wg.Agents {
 			knownAgent[a.ID] = true
 			if a.Branch != "" {
 				knownBranch[a.Branch] = true
 			}
+			label := ""
+			if a.Archived {
+				label = "archived"
+			}
+			if a.Dir == "" {
+				legacy[a.ID] = trackedDir{id: a.ID, label: label}
+				continue
+			}
+			dir := filepath.Clean(a.Dir)
+			byDir[dir] = trackedDir{id: a.ID, label: label, dir: dir}
 		}
 	}
 
-	seenDir := map[string]bool{}
-	rootEnts, _ := os.ReadDir(sessionsDir)
-	for _, re := range rootEnts {
-		if !re.IsDir() {
+	var res reconcileResult
+	legacySeen := map[string]bool{}
+	tops, _ := os.ReadDir(sessionsDir)
+	for _, top := range tops {
+		if !top.IsDir() || strings.HasPrefix(top.Name(), ".") {
 			continue
 		}
-		agentEnts, _ := os.ReadDir(filepath.Join(sessionsDir, re.Name()))
-		for _, ae := range agentEnts {
-			// Root sessions keep their own config alongside child agent dirs.
-			if !ae.IsDir() || strings.HasPrefix(ae.Name(), ".") {
+		container := filepath.Join(sessionsDir, top.Name())
+		kids, _ := os.ReadDir(container)
+		for _, kid := range kids {
+			// Hidden entries are a root session's private config homes.
+			if !kid.IsDir() || strings.HasPrefix(kid.Name(), ".") {
 				continue
 			}
-			seenDir[ae.Name()] = true
-			if !knownAgent[ae.Name()] {
-				orphanDirs = append(orphanDirs, filepath.Join(re.Name(), ae.Name()))
+			p := filepath.Join(container, kid.Name())
+			if _, ok := byDir[p]; ok {
+				continue
 			}
+			// A member recorded before sessions stored their directory is
+			// recognized by its id wherever it lives (it may have moved).
+			if _, ok := legacy[kid.Name()]; ok {
+				legacySeen[kid.Name()] = true
+				continue
+			}
+			if ownsContainer[container] {
+				continue
+			}
+			res.OrphanDirs = append(res.OrphanDirs, filepath.Join(top.Name(), kid.Name()))
 		}
 	}
-	for id := range knownAgent {
-		if !seenDir[id] {
-			missingDirs = append(missingDirs, id)
+
+	for _, t := range byDir {
+		if reason := notDirReason(t.dir); reason != "" {
+			res.MissingDirs = append(res.MissingDirs, t.describe()+": "+t.dir+" ("+reason+")")
 		}
 	}
+	for id, t := range legacy {
+		if !legacySeen[id] {
+			res.MissingDirs = append(res.MissingDirs, t.describe()+": no directory named "+id+" under "+sessionsDir)
+		}
+	}
+
 	for _, ref := range disk {
 		// A branch is accounted for if it's some agent's stored branch, or — even
 		// when that field is blank (older sessions) — if the agent id encoded in the
-		// branch is a live agent. Only a branch that maps to no session is a leftover.
+		// branch is a tracked agent. Only a branch that maps to no session is a leftover.
 		if knownBranch[ref.Branch] {
 			continue
 		}
 		if id := agentIDFromBranch(ref.Branch); id != "" && knownAgent[id] {
 			continue
 		}
-		orphanBranches = append(orphanBranches, ref.Repo+" · "+ref.Branch)
+		res.OrphanBranches = append(res.OrphanBranches, ref.Repo+" · "+ref.Branch)
 	}
 
-	sort.Strings(orphanDirs)
-	sort.Strings(missingDirs)
-	sort.Strings(orphanBranches)
-	return orphanDirs, missingDirs, orphanBranches
+	sort.Strings(res.OrphanDirs)
+	sort.Strings(res.MissingDirs)
+	sort.Strings(res.OrphanBranches)
+	return res
 }
 
-// agentIDFromBranch extracts the agent id from an amux branch (amux/<root>-<agent>[-<description>]
-// → <agent>), or "" for a legacy amux/<root> branch that names no agent. This lets
-// reconciliation match a branch to a live agent by id even when the session's
-// stored branch is blank.
-func agentIDFromBranch(branch string) string {
-	b, ok := strings.CutPrefix(branch, core.BranchPrefix)
-	if !ok {
-		return ""
+func (t trackedDir) describe() string {
+	if t.label == "" {
+		return t.id
 	}
-	if _, tail, ok := strings.Cut(b, "-"); ok {
-		id, _, _ := strings.Cut(tail, "-")
-		return id
+	return t.id + " (" + t.label + ")"
+}
+
+// notDirReason returns "" when dir is a directory, else why it is not.
+func notDirReason(dir string) string {
+	info, err := os.Stat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "does not exist"
+	case err != nil:
+		return err.Error()
+	case !info.IsDir():
+		return "not a directory"
 	}
 	return ""
+}
+
+// agentIDFromBranch extracts the agent id from an amux branch of any scheme
+// (amux/<broker>/<root>-<agent>[-<description>] or the pre-broker
+// amux/<root>-<agent>[-<description>] → <agent>), or "" for a legacy amux/<root>
+// branch that names no agent. This lets reconciliation match a branch to a live
+// agent by id even when the session's stored branch is blank.
+func agentIDFromBranch(branch string) string {
+	p, _ := core.ParseBranch(branch)
+	return p.Agent
 }
 
 // iTerm2's per-profile "Option Key Sends" setting: 0 Normal (Option types

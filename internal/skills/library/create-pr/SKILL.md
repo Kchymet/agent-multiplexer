@@ -149,7 +149,7 @@ gh repo view --json defaultBranchRef -q .defaultBranchRef.name
 ```
 
 **Stacked PR:** the base is your predecessor's branch instead (the one your
-coordinator named, e.g. `amux/<wg>-<predecessor>`), and the body starts with
+coordinator named, e.g. `amux/<broker>/<wg>-<predecessor>`), and the body starts with
 `Stacked on #<parent> — merge that first.` See "Stacked PRs" below.
 
 Create the PR against that base, head = your branch, with a HEREDOC body. This

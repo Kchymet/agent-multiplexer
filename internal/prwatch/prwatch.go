@@ -91,7 +91,7 @@ type Member struct {
 	SessionID string
 	Workgroup string // the workgroup (= its coordinator's session) id
 	Label     string // display label for wake-ups (name or id)
-	Branch    string // the member's branch, e.g. amux/<wg>-<member>
+	Branch    string // the member's branch, e.g. amux/<broker>/<wg>-<member>
 	Repos     []string
 }
 
@@ -368,8 +368,10 @@ func (w *Watcher) Poll(ctx context.Context) {
 		w.cfg.Logf("prwatch: list members: %v", err)
 		return
 	}
-	// One query per (repo, branch prefix): members of every workgroup in a repo
-	// share the "amux/" prefix, so this is normally one gh call per repo.
+	// One query per (repo, branch namespace): this broker's members share the
+	// "amux/<broker>/" prefix (pre-broker members share "amux/"), so this is
+	// normally one gh call per repo, and it never lists another broker's
+	// branches. Ownership is still decided per member by Owns below.
 	type query struct{ repo, prefix, head string }
 	queries := map[query]bool{}
 	for _, m := range members {
@@ -377,7 +379,7 @@ func (w *Watcher) Poll(ctx context.Context) {
 			continue
 		}
 		for _, repo := range m.Repos {
-			if i := strings.Index(m.Branch, "/"); i > 0 {
+			if i := strings.LastIndex(m.Branch, "/"); i > 0 {
 				queries[query{repo: repo, prefix: m.Branch[:i+1]}] = true
 			} else {
 				queries[query{repo: repo, head: m.Branch}] = true
