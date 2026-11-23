@@ -63,11 +63,12 @@ func postActionFrom(ctx context.Context) *postActionSlot {
 // outcome through. When the caller can wait (handle installed a slot), the
 // result becomes the action's result. A caller that holds admission across the
 // action (an amux-originated PR wake) cannot wait without deadlocking, so it
-// gets the old acknowledgement and the journal still records the outcome.
+// gets nil: the old acknowledgement, with start failures still journaled and
+// no acknowledgement polling that no one would read.
 func coldStartReporter(ctx context.Context) func(error) {
 	slot := postActionFrom(ctx)
 	if slot == nil {
-		return func(error) {}
+		return nil
 	}
 	done := make(chan error, 1)
 	slot.wait = func(waitCtx context.Context) error {

@@ -390,7 +390,9 @@ func (d *Daemon) steerStructured(ctx context.Context, id string, sup structuredS
 func (d *Daemon) runStructuredPrompt(ctx context.Context, id string, sup structuredSteerer, text string, onBegin ...func(error)) {
 	begun := func(err error) {
 		for _, f := range onBegin {
-			f(err)
+			if f != nil {
+				f(err)
+			}
 		}
 	}
 	starter, ok := sup.(structuredPromptStarter)
@@ -461,7 +463,9 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 			structuredNotice(sess.ID, core.JournalError, fmt.Sprintf("start agent %s: %v", sess.ID, err))
 			err = fmt.Errorf("start agent %s: %w", sess.ID, err)
 			d.steerStartFailed(sess.ID, err)
-			report(err)
+			if report != nil {
+				report(err)
+			}
 			return
 		}
 		d.triggerPoll()
@@ -526,14 +530,20 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 		d.deferInput(in, payload)
 		return nil
 	})
-	started()
 	if err != nil {
 		err = fmt.Errorf("start agent %s: %w", id, err)
 		d.steerStartFailed(id, err)
-		report(err)
+		started()
+		if report != nil {
+			report(err)
+		}
 		return
 	}
 	d.triggerPoll()
+	started()
+	if report == nil {
+		return // nobody waits on the outcome: keep the old acknowledgement
+	}
 	if err := d.awaitPromptAck(ctx, id, in, queued, submitBy(queued, payload)); err != nil {
 		d.steerStartFailed(id, err)
 		report(err)
