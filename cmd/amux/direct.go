@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -51,6 +52,7 @@ var directSubcommands = map[string]func([]string) error{
 	"serve":          cmdDirectServe,
 	"enroll":         cmdDirectEnroll,
 	"clients":        cmdDirectClients,
+	"audit":          cmdDirectAudit,
 	"reset-identity": cmdDirectResetIdentity,
 	"cloud":          cmdDirectCloud,
 	"wake":           cmdDirectWake,
@@ -87,6 +89,8 @@ usage: amux direct <command>
                               amux direct enroll --help)
   clients list                list enrolled clients
   clients revoke <client-id>  revoke a client now (closes its streams first)
+  audit [--client <id>] [--limit N] [--json]  answers, item triage and overseer
+                              steers made by direct clients (newest last)
   reset-identity --yes        replace the server identity; revokes every client
   cloud enable|disable|status  cloud-assisted enrollment policy (off by default)
 
@@ -367,6 +371,59 @@ func cmdDirectClients(args []string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown clients command %q", args[0])
+}
+
+// cmdDirectAudit prints the direct audit log (internal/direct/audit.go).
+func cmdDirectAudit(args []string) error {
+	req := direct.AdminRequest{Op: direct.OpAudit}
+	asJSON := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json":
+			asJSON = true
+		case "--client":
+			if i+1 >= len(args) {
+				return errors.New("--client needs a client id")
+			}
+			i++
+			req.ClientID = args[i]
+		case "--limit":
+			if i+1 >= len(args) {
+				return errors.New("--limit needs a number")
+			}
+			i++
+			n, err := strconv.Atoi(args[i])
+			if err != nil || n <= 0 {
+				return errors.New("--limit must be a positive number")
+			}
+			req.Limit = n
+		default:
+			return fmt.Errorf("usage: amux direct audit [--client <id>] [--limit N] [--json]")
+		}
+	}
+	resp, err := adminRun(req)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(resp.Audit)
+	}
+	if len(resp.Audit) == 0 {
+		fmt.Println("(no audited direct actions)")
+		return nil
+	}
+	for _, r := range resp.Audit {
+		who := r.ClientID
+		if r.Label != "" {
+			who += " (" + r.Label + ")"
+		}
+		text := strings.Join(strings.Fields(r.Text), " ")
+		if len(text) > 80 {
+			text = text[:80] + "…"
+		}
+		fmt.Printf("%s  %s  %-15s %-16s %-14s %-12s %s\n", time.UnixMilli(r.At).Format(time.RFC3339), who, r.Route, r.Verb, r.Target, r.Outcome, text)
+	}
+	return nil
 }
 
 func cmdDirectResetIdentity(args []string) error {

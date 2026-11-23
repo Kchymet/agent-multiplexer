@@ -23,8 +23,6 @@ import (
 	"amux/internal/daemon"
 	"amux/internal/hostbackend"
 	amuxstore "amux/internal/store"
-
-	"github.com/gorilla/websocket"
 )
 
 // Config configures a Server.
@@ -111,6 +109,11 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET "+PathCapabilities, s.capabilities)
 	mux.HandleFunc("GET "+PathCreations+"/{cid}", s.creationStatus)
 	mux.HandleFunc("GET "+PathAccounts, s.accounts)
+	mux.HandleFunc("GET "+PathQueue, s.queueRoute)
+	mux.HandleFunc("GET "+PathQueueWatch, s.queueWatch)
+	mux.HandleFunc("POST "+PathQueue+"/{id}/answer", s.answerRoute)
+	mux.HandleFunc("GET "+PathSummary, s.summaryRoute)
+	mux.HandleFunc("POST "+PathItems+"/{id}/state", s.itemStateRoute)
 	s.registerWakeRoutes(mux)
 	s.mux = mux
 	return s, nil
@@ -475,7 +478,7 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		s.writeBackendErr(w, l, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, SessionsResponse{ServerID: s.cfg.Authority.ServerID(), Sessions: s.withIncarnations(l, filtered(l.Grant, rows))})
+	writeJSON(w, http.StatusOK, SessionsResponse{ServerID: s.cfg.Authority.ServerID(), Sessions: s.withIncarnations(l, filteredWith(l.Grant, rows, includeOverseer(r)))})
 }
 
 func (s *Server) history(w http.ResponseWriter, r *http.Request) {
@@ -729,8 +732,23 @@ func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 		if !ok || !inScope(l.Grant, row, byID) {
 			return admission{}, errNotFound
 		}
+		var audit *AuditRecord
+		if isOverseer(row) {
+			// The overseer takes prompt, interject and stop, and only from a
+			// grant that already holds everything it could do itself.
+			if !overseerVerbAllowed(l.Grant, req.Verb) {
+				if req.Verb == VerbPrompt || req.Verb == VerbInterject || req.Verb == VerbStop {
+					return admission{}, errOverseerDenied
+				}
+				return admission{}, errUnsupported
+			}
+			audit = &AuditRecord{Route: "overseer.steer", Verb: req.Verb, Target: sid, Text: req.Fields["text"]}
+		}
 		if err := admissible(row, byID, req.Verb); err != nil {
 			return admission{}, err
+		}
+		if audit != nil {
+			return admission{audit: audit}, nil
 		}
 		if req.Verb == VerbAddAgent {
 			if err := s.checkCatalog(l, act, sid); err != nil {
@@ -837,6 +855,14 @@ func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, b
 		s.writePrecheckErr(w, l, req.Verb, err)
 		return
 	}
+	if adm.audit != nil {
+		adm.audit.ClientID, adm.audit.Label = l.ClientID, s.cfg.Authority.ClientLabel(l.ClientID)
+		if err := s.cfg.Authority.Audit(adm.audit.with("admitted")); err != nil {
+			s.cfg.Logf("direct: audit: %v", err)
+			writeErr(w, http.StatusServiceUnavailable, CodeUnavailable, "the audit log could not be written; nothing ran")
+			return
+		}
+	}
 	if code := l.AuthEnded(); code != "" { // expiry before execution still denies
 		writeErr(w, http.StatusUnauthorized, code, "access ended before the action ran")
 		return
@@ -864,6 +890,15 @@ func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, b
 	}
 	cancel()
 	status, body := s.settle(l, req.IdemKey, req.Verb, act, adm.affected, ident, err)
+	if adm.audit != nil {
+		outcome := "ok"
+		if e, isErr := body.(APIError); isErr {
+			outcome = e.Code
+		}
+		if err := s.cfg.Authority.Audit(adm.audit.with(outcome)); err != nil {
+			s.cfg.Logf("direct: audit: %v", err)
+		}
+	}
 	writeJSON(w, status, body)
 }
 
@@ -888,6 +923,8 @@ func (s *Server) writeBeginErr(w http.ResponseWriter, err error) bool {
 // precheckCode maps a precheck refusal to its wire code, status and text.
 func precheckCode(l *Lease, verb string, err error) (int, string, string) {
 	switch {
+	case errors.Is(err, errOverseerDenied):
+		return http.StatusForbidden, CodeDenied, "steering the overseer needs an all-sessions client with steer, manage and create"
 	case errors.Is(err, errArchived):
 		return http.StatusConflict, CodeArchived, "the session or its workgroup is archived (or, for unarchive, not archived)"
 	case errors.Is(err, errUnsupported):
@@ -909,6 +946,9 @@ func precheckCode(l *Lease, verb string, err error) (int, string, string) {
 }
 
 func (s *Server) writePrecheckErr(w http.ResponseWriter, l *Lease, verb string, err error) {
+	if errors.Is(err, errOverseerDenied) {
+		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope", scope="steer manage create"`)
+	}
 	status, code, msg := precheckCode(l, verb, err)
 	if code == CodeUnavailable {
 		s.cfg.Logf("direct: backend: %v", err)
@@ -995,6 +1035,9 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 	resp.AccountStatus = &accountStatus
 	resp.Wake = &WakeCapabilities{V: 1}
 	resp.Enrichments = enrichmentCaps(l.Context(), s.cfg.Backend)
+	if _, ok := s.queueBackend(); ok {
+		resp.Queue, resp.Overseer = queueCaps(l.Grant)
+	}
 	if s.cfg.Wake != nil {
 		st := s.cfg.Wake.Status()
 		resp.Wake.Enabled, resp.Wake.Degraded = st.Enabled, st.Degraded
@@ -1057,6 +1100,8 @@ func (s *Server) idemReply(w http.ResponseWriter, l *Lease, out idemOutcome, rec
 			status := http.StatusUnprocessableEntity
 			if rec.Code == CodeUnavailable || rec.Code == CodeDaemonUpgradeRequired {
 				status = http.StatusServiceUnavailable
+			} else if rec.Code == CodeAskerGone || rec.Code == CodeAnswered {
+				status = http.StatusConflict
 			}
 			writeErr(w, status, rec.Code, rec.Error)
 		}
@@ -1076,103 +1121,16 @@ func (s *Server) idemReply(w http.ResponseWriter, l *Lease, out idemOutcome, rec
 
 // ── watch (WebSocket) ──────────────────────────────────────────────────────
 
+// watch is GET /direct/v1/sessions/watch: the grant's inventory, pushed on
+// change (serveWatch). ?include=overseer adds the overseer row, as on GET
+// /sessions.
 func (s *Server) watch(w http.ResponseWriter, r *http.Request) {
-	up := websocket.Upgrader{
-		HandshakeTimeout: 10 * time.Second,
-		// ServeHTTP already refused a disallowed Origin; an absent one is a
-		// non-browser client.
-		CheckOrigin: func(r *http.Request) bool { o := r.Header.Get("Origin"); return o == "" || s.origins[o] },
-	}
-	conn, err := up.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	conn.SetReadLimit(MaxWatchAuthSize)
-	closeWith := func(code int, reason string) {
-		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	var auth WatchAuth
-	if err := conn.ReadJSON(&auth); err != nil || auth.Type != "auth" {
-		closeWith(CloseAuthInvalid, CodeAuthInvalid)
-		return
-	}
-	_ = conn.SetReadDeadline(time.Time{})
-	l, err := s.cfg.Authority.Admit(r.Context(), auth.AccessToken, PermRead)
-	if err != nil {
-		switch {
-		case errors.Is(err, errAuthExpired):
-			closeWith(CloseAuthExpired, CodeAuthExpired)
-		case errors.Is(err, errAuthRevoked):
-			closeWith(CloseAuthRevoked, CodeAuthRevoked)
-		case errors.Is(err, errDenied):
-			closeWith(CloseDenied, CodeDenied)
-		default:
-			closeWith(CloseAuthInvalid, CodeAuthInvalid)
-		}
-		return
-	}
-	defer l.Done()
-	ctx, cancel := context.WithCancel(l.Context())
-	defer cancel()
-	go func() { // reader: notice the client going away; no further client frames are meaningful
-		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
-				cancel()
-				return
-			}
-		}
-	}()
-	var wmu sync.Mutex
-	write := func(v any) bool {
-		wmu.Lock()
-		defer wmu.Unlock()
-		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		return conn.WriteJSON(v) == nil
-	}
-	if !write(WatchWelcome{Type: "welcome", ServerID: s.cfg.Authority.ServerID(), ExpiresAt: l.ExpiresAt}) {
-		return
-	}
-	poll := time.NewTicker(s.cfg.WatchPoll)
-	defer poll.Stop()
-	var last []byte
-	push := func() bool {
+	overseer := includeOverseer(r)
+	s.serveWatch(w, r, func(ctx context.Context, l *Lease) (any, error) {
 		rows, err := s.cfg.Backend.Snapshot(ctx)
 		if err != nil {
-			// A daemon failure keeps the socket and retries next tick. If the
-			// lease ended, the loop's ctx.Done branch sends the auth close code;
-			// returning false here would drop the socket without one.
-			return true
+			return nil, err
 		}
-		if ctx.Err() != nil {
-			return true // the loop reports why; never send data after the lease ended
-		}
-		snap := WatchSnapshot{Type: "snapshot", Sessions: s.withIncarnations(l, filtered(l.Grant, rows))}
-		data, _ := json.Marshal(snap)
-		if bytes.Equal(data, last) {
-			return true
-		}
-		last = data
-		return write(snap)
-	}
-	if !push() {
-		return
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			switch l.AuthEnded() {
-			case CodeAuthRevoked:
-				closeWith(CloseAuthRevoked, CodeAuthRevoked)
-			case CodeAuthExpired:
-				closeWith(CloseAuthExpired, CodeAuthExpired)
-			}
-			return
-		case <-poll.C:
-			if !push() {
-				return
-			}
-		}
-	}
+		return WatchSnapshot{Type: "snapshot", Sessions: s.withIncarnations(l, filteredWith(l.Grant, rows, overseer))}, nil
+	})
 }
