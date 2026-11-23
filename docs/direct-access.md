@@ -78,10 +78,10 @@ refused. An explicit console grant would be a separately reviewed feature.
    amux direct enroll --label "Pixel" --permissions read,steer --workgroup 771951
    ```
 
-   The scope never defaults: give `--all-sessions` or one or more
-   `--workgroup <root-id>`. Without either, `enroll` asks on a terminal (all
-   sessions, a workgroup, or cancel; nothing is preselected) and otherwise
-   fails with a working example. Permissions default to `read`; add any of
+   The scope defaults to every ordinary session (`--all-sessions`); give one
+   or more `--workgroup <root-id>` to narrow it. The amux console is never in
+   any scope, defaulted or not, and the effective scope is printed (marked
+   "(default)") before anything is minted. Permissions default to `read`; add any of
    `steer`, `respond`, `approve`, `manage` and `create` (see
    [Permissions](#permissions)) with `--permissions`; each is explicit and none
    implies another. The label defaults to `<hostname>-<YYYYMMDD-HHMM>`. Before

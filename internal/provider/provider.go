@@ -169,7 +169,7 @@ func New(cfg Config) *Provider {
 	}
 	return &Provider{
 		cfg:        cfg,
-		status:     Status{PID: os.Getpid(), Name: cfg.Name, Orchestrator: cfg.Orchestrator},
+		status:     Status{PID: os.Getpid(), Name: cfg.Name, Orchestrator: cfg.Orchestrator, StartedAt: time.Now()},
 		versions:   []int{harnessproto.Version, harnessproto.Version2},
 		panes:      map[string]*pane{},
 		backoffMin: time.Second,

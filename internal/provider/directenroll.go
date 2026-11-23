@@ -160,7 +160,9 @@ func validDirectRequest(r *hp.DirectEnrollRequest) bool {
 	default:
 		return false
 	}
-	if len(r.Label) > maxDirectLabel || len(r.Permissions) == 0 || len(r.Permissions) > maxDirectPerms ||
+	// No permissions asks the host for its default (read, plus steer when the
+	// ceiling allows it).
+	if len(r.Label) > maxDirectLabel || len(r.Permissions) > maxDirectPerms ||
 		len(r.Resource.Workgroups) > maxDirectWorkgroups {
 		return false
 	}
@@ -182,7 +184,9 @@ func (p *Provider) handleDirectEnroll(s *session, m hp.MuxMsg) {
 	if m.ReqID == "" || len(m.ReqID) > 128 {
 		return // nothing to correlate a reply with
 	}
+	start := time.Now()
 	reply := func(r hp.DirectEnrollResult) {
+		p.noteDirectEnroll(m.DirectEnroll, r, start)
 		if s.rtCtx.Err() == nil {
 			_ = s.hc.WriteHarness(hp.HarnessMsg{Type: hp.HDirectEnrollResult, ReqID: m.ReqID, DirectEnroll: &r})
 		}
@@ -221,4 +225,43 @@ func (p *Provider) handleDirectEnroll(s *session, m hp.MuxMsg) {
 			reply(hp.DirectEnrollResult{Error: hp.DirectEnrollErrUnavailable})
 		}
 	}()
+}
+
+// noteDirectEnroll records and logs how one relayed direct-enroll request was
+// answered, so `amux direct status` and the daemon log show whether (and
+// when) a cloud enrollment reached this host and how it ended. It records the
+// request's kind and the result's code only: never the requester, issue key,
+// challenge, label or bundle.
+func (p *Provider) noteDirectEnroll(req *hp.DirectEnrollRequest, r hp.DirectEnrollResult, start time.Time) {
+	now := time.Now()
+	at := DirectEnrollAttempt{At: now, Kind: "other", Outcome: "refused", Code: r.Error, Millis: now.Sub(start).Milliseconds()}
+	if req != nil {
+		switch req.Handoff {
+		case "":
+			at.Kind = "pkce_code"
+		case hp.DirectHandoffDeviceTicket:
+			at.Kind = "device_ticket"
+		}
+	}
+	if r.Error == "" && r.Bundle != "" {
+		at.Outcome, at.Code = "issued", ""
+	} else if !knownDirectEnrollErr(r.Error) {
+		at.Code = hp.DirectEnrollErrUnavailable
+	}
+	p.cfg.Logf("direct-enroll request from Harness reached this host: %s", at)
+	p.setStatus(func(st *Status) {
+		st.DirectEnrollLast = &at
+		st.DirectEnrollCount++
+	})
+}
+
+func knownDirectEnrollErr(code string) bool {
+	switch code {
+	case hp.DirectEnrollErrDisabled, hp.DirectEnrollErrOwnerMismatch, hp.DirectEnrollErrProviderMismatch,
+		hp.DirectEnrollErrInvalidRequest, hp.DirectEnrollErrInvalidChallenge, hp.DirectEnrollErrScope,
+		hp.DirectEnrollErrIdemConflict, hp.DirectEnrollErrIssueExpired, hp.DirectEnrollErrCapacity,
+		hp.DirectEnrollErrRateLimited, hp.DirectEnrollErrBusy, hp.DirectEnrollErrUnavailable:
+		return true
+	}
+	return false
 }

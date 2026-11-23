@@ -69,7 +69,7 @@ func (r *RelayIssuer) Enroll(ctx context.Context, providerID string, req hp.Dire
 		return hp.DirectEnrollResult{Bundle: resp.Bundle, ExpiresAt: resp.ExpiresAt, ServerID: resp.ServerID}
 	}
 	if code, ok := relayCodes[resp.Code]; ok {
-		return hp.DirectEnrollResult{Error: code}
+		return hp.DirectEnrollResult{Error: code, Reason: CloudReason(resp.Code)}
 	}
 	return hp.DirectEnrollResult{Error: hp.DirectEnrollErrUnavailable}
 }

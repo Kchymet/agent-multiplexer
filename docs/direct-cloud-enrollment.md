@@ -126,7 +126,7 @@ cloud enrollment: enabled (generation 3)
 **Full syntax:**
 
 ```
-amux direct cloud enable --permissions read[,steer] (--all-sessions | --workgroup <root-id>...) \
+amux direct cloud enable --permissions read[,steer] [--all-sessions | --workgroup <root-id>...] \
     [--owner <harness-user-id>] [--provider <provider-id>] \
     [--max-outstanding 3] [--max-per-hour 10]
 amux direct cloud status [--json]
@@ -135,8 +135,13 @@ amux direct cloud disable
 
 **The flags:**
 
-- **The ceiling** has no implicit default. `--all-sessions` covers ordinary
-  sessions and never the amux console. `--workgroup console` is refused.
+- **The resource ceiling** defaults to every ordinary session
+  (`--all-sessions`), never the amux console; `--workgroup` narrows it, and
+  `--workgroup console` is refused. A relayed request that names no resource
+  asks for the whole ceiling. The permission ceiling is always explicit.
+- **Default permissions.** A relayed request that names no permissions gets
+  `read`, plus `steer` when the ceiling includes `steer`, so "Allow steer"
+  is on by default exactly when it is allowed. Nothing else is implied.
 - **`--owner` and `--provider` are optional.** An omitted pin comes from this
   host's **current** provider registration. That is the `owner` and
   `providerId` Harness returned in `registered` to this host's
@@ -202,6 +207,55 @@ client chose.
 | Provider recreated in Harness (new id) | `provider_mismatch` until you re-pin |
 | Endpoint change | Restart `amux direct serve` (or re-run `amux direct enable --endpoint …`, which the daemon applies); bundles carry the running endpoints, and the provider re-registers with them within about a minute |
 | Direct server not running (or `amux direct disable`) | The running provider withdraws the offer by re-registering within about a minute; until then requests answer `unavailable` |
+
+**Did an enrollment reach this host?** With tailnet endpoints (`amux direct
+enable --tailnet`), the client (web or Android, on the tailnet) claims and
+redeems its code directly at this host, pinned to the advertised server id.
+No enrollment payload goes through Harness. When a client says it cannot
+reach this machine, `amux direct status` (`enrollment` in `--json`) says
+whether anything arrived. Three places record their latest request:
+
+- `exchange_last`: a claim or a code redemption at the direct server's
+  claim and token endpoints, since the server started. This is the request
+  that proves a client reached this host.
+- `provider_last`: Harness's direct-enroll request for a cloud code or
+  ticket, at the provider, since the provider started.
+- `server_last`: the direct server's answer to that request.
+
+A record holds the time, the step or kind, the outcome, the refusal code and
+the reason. It never holds the requester, issue key, challenge, verifier,
+code, token or client address. Each request is also logged:
+`direct: enrollment …` and `direct: cloud enrollment request reached this
+host: …` in `amux direct logs`, and `direct-enroll request from Harness
+reached this host: …` in the provider log.
+
+What the records mean:
+
+- **No record since the server started:** the failure is between the client
+  and this host. Check that the device is on the tailnet, and check ACLs, DNS
+  and TLS.
+- **A refusal:** the request reached this host and was refused here, for the
+  reason shown.
+
+**Refusal reasons.** Refusals carry a machine-readable `reason` that clients
+show as `host_refused`. The values are `ceiling`, `ticket_expired`,
+`ticket_used` and `other`.
+
+- **At the token and claim endpoints,** `invalid_grant` errors carry
+  `reason`:
+  - `ticket_used`: the code was already redeemed, or the ticket was claimed
+    by another device.
+  - `ticket_expired`: the code expired, or the cloud policy it was issued
+    under was replaced or disabled.
+  - `other`: an unknown code or a wrong verifier.
+  Refresh-token refusals carry no reason.
+- **In the relay result,** `direct-enroll-result` carries `reason` next to
+  `error`:
+  - `scope_exceeds_ceiling` → `ceiling`
+  - `issue_expired` → `ticket_expired`
+  - any other code → `other`
+  Older hosts send neither field, and clients treat a missing or unknown
+  reason as `other`.
 
 ## Administration boundary
 

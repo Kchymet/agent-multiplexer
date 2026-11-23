@@ -55,6 +55,38 @@ var (
 	errInvalidCode = errors.New(OAuthInvalidGrant)
 )
 
+// codeRefusal is errInvalidCode with the reason a client is told
+// (OAuthError.Reason). errors.Is(err, errInvalidCode) holds for it.
+type codeRefusal struct{ reason string }
+
+func (e *codeRefusal) Error() string        { return OAuthInvalidGrant + " (" + e.reason + ")" }
+func (e *codeRefusal) Is(target error) bool { return target == errInvalidCode }
+
+func invalidCode(reason string) error { return &codeRefusal{reason: reason} }
+
+// codeReason is the refusal reason of an invalid-code error (ReasonOther when
+// it carries none).
+func codeReason(err error) string {
+	var cr *codeRefusal
+	if errors.As(err, &cr) {
+		return cr.reason
+	}
+	return ReasonOther
+}
+
+// codeStateReason classifies a stored code that can no longer be used.
+func codeStateReason(rec *codeRecord, now int64) string {
+	switch {
+	case rec == nil:
+		return ReasonOther
+	case rec.ConsumedAt != 0:
+		return ReasonTicketUsed
+	case now >= rec.ExpiresAt:
+		return ReasonTicketExpired
+	}
+	return ReasonOther
+}
+
 // Lifetimes configures an Authority. Zero fields take the defaults; values
 // above the defaults are refused.
 type Lifetimes struct {
@@ -108,6 +140,17 @@ type Authority struct {
 	life     Lifetimes
 	now      func() time.Time
 	boot     string
+
+	// Relayed cloud issuance attempts seen since cloudSince (memory only;
+	// see CloudStatus.LastAttempt).
+	cloudLast     *CloudAttempt
+	cloudAttempts int
+	cloudSince    int64
+	// Enrollment exchanges (claim, code redemption) clients made directly
+	// with this server since enrollSince (memory only; see EnrollActivity).
+	enrollLast  *EnrollAttempt
+	enrollCount int
+	enrollSince int64
 
 	access   map[string]accessRec // sha256(token) -> record; memory only
 	tomb     map[string]int64     // revoked access-token hashes -> exp
@@ -225,6 +268,8 @@ func loadAuthority(st *store, life Lifetimes, now func() time.Time) (*Authority,
 		st: st, state: state, identity: id, life: life, now: now, boot: hex.EncodeToString(boot),
 		access: map[string]accessRec{}, tomb: map[string]int64{}, running: map[string]bool{}, leases: map[string]map[*Lease]struct{}{},
 	}
+	a.cloudSince = a.now().Unix()
+	a.enrollSince = a.cloudSince
 	a.pruneWakeLocked() // in memory only: never a startup write
 	if state.IdentityGeneration != id.Generation {
 		// A grant issued under another identity can never be valid again.
@@ -456,7 +501,7 @@ func (a *Authority) Redeem(code, label, kind, verifier string) (TokenResponse, e
 	key := hashToken(code)
 	rec := a.state.Codes[key]
 	if rec == nil || rec.ConsumedAt != 0 || now >= rec.ExpiresAt {
-		return TokenResponse{}, errInvalidCode
+		return TokenResponse{}, invalidCode(codeStateReason(rec, now))
 	}
 	if err := a.checkVerifierLocked(key, rec, verifier, now); err != nil {
 		return TokenResponse{}, err

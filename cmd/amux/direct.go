@@ -115,12 +115,12 @@ derives, and an empty value returns that setting to derivation):
   foreground only while the managed listener is disabled.
 
 `+directEnrollHelp+`
-cloud enable flags (the ceiling is required; all-sessions covers ordinary
-sessions, never the amux console):
+cloud enable flags (the resource ceiling defaults to all ordinary sessions,
+never the amux console):
   --permissions <list>    ceiling: read plus any of steer, respond, approve,
                           manage, create, accounts (see enroll); codes never exceed it
-  --all-sessions          ceiling: any ordinary session, or
-  --workgroup <root-id>   ceiling: these workgroups (repeatable)
+  --all-sessions          ceiling: any ordinary session (the default), or
+  --workgroup <root-id>   ceiling: only these workgroups (repeatable)
   --owner <user-id>       advanced: the Harness user id allowed to request codes
   --provider <id>         advanced: this host's Harness provider id
                           Both default to the owner and provider Harness
@@ -475,7 +475,10 @@ func directResourceFlags(all bool, groups []string) (direct.ResourceScope, error
 	case len(groups) > 0:
 		return direct.ResourceScope{Kind: direct.ResourceWorkgroups, Workgroups: groups}, nil
 	}
-	return direct.ResourceScope{}, errors.New("choose the resource scope explicitly: --all-sessions or --workgroup <root-id>")
+	// The default scope is every ordinary session. The console is not a
+	// session any scope covers (ValidateResource refuses it by id, and
+	// all_sessions excludes it), so the default never reaches it.
+	return direct.ResourceScope{Kind: direct.ResourceAllSessions}, nil
 }
 
 func printCloudStatus(c direct.CloudStatus) {

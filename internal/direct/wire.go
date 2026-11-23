@@ -271,7 +271,22 @@ type TokenResponse struct {
 type OAuthError struct {
 	Error       string `json:"error"`
 	Description string `json:"error_description,omitempty"`
+	// Reason classifies an enrollment refusal (invalid_grant at the token or
+	// claim endpoint) for client UIs: one of the Reason* values. Absent on
+	// other errors and from older hosts; clients treat unknown values as
+	// ReasonOther.
+	Reason string `json:"reason,omitempty"`
 }
+
+// Enrollment refusal reasons (OAuthError.Reason, CloudAttempt.Reason,
+// EnrollAttempt.Reason and the relay result's reason). They match the
+// host_refused.reason vocabulary Harness and Android display.
+const (
+	ReasonCeiling       = "ceiling"        // the request asks for more than the host allows
+	ReasonTicketExpired = "ticket_expired" // the code or ticket expired (or its cloud policy was replaced)
+	ReasonTicketUsed    = "ticket_used"    // the code or ticket was already used, or claimed by another device
+	ReasonOther         = "other"          // anything else (unknown code, wrong verifier, malformed request, ...)
+)
 
 // APIError is the error body of every resource route.
 type APIError struct {

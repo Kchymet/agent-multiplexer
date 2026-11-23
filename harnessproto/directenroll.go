@@ -48,6 +48,15 @@ const (
 	DirectEnrollErrUnavailable      = "unavailable"           // outcome unknown or host unavailable: retry with the SAME issueKey
 )
 
+// Direct enrollment refusal reasons (DirectEnrollResult.Reason, and the
+// direct server's OAuth error "reason" at its token and claim endpoints).
+const (
+	DirectReasonCeiling       = "ceiling"
+	DirectReasonTicketExpired = "ticket_expired"
+	DirectReasonTicketUsed    = "ticket_used"
+	DirectReasonOther         = "other"
+)
+
 // DirectCapabilities advertises this host's direct server for discovery. It is
 // present only while direct enrollment is offered. Endpoints are the canonical
 // https origins clients dial; the client verifies them itself (trusted TLS and
@@ -95,4 +104,9 @@ type DirectEnrollResult struct {
 	ExpiresAt int64  `json:"expiresAt,omitempty"`
 	ServerID  string `json:"serverId,omitempty"`
 	Error     string `json:"error,omitempty"`
+	// Reason classifies a host refusal for client UIs (host_refused.reason):
+	// DirectReasonCeiling, DirectReasonTicketExpired or DirectReasonOther.
+	// Absent from older hosts and on provider-level refusals; treat absent or
+	// unknown as other.
+	Reason string `json:"reason,omitempty"`
 }

@@ -118,6 +118,8 @@ type AdminResponse struct {
 	Code  string             `json:"code,omitempty"`
 	Cloud *CloudStatus       `json:"cloud,omitempty"`
 	Wake  *WakeAdminResponse `json:"wake,omitempty"`
+	// Enroll is the direct enrollment exchange activity (OpCloudStatus).
+	Enroll *EnrollActivity `json:"enroll,omitempty"`
 }
 
 // EncodeBundle renders a paste bundle.
@@ -263,9 +265,15 @@ func (s *AdminServer) handle(parent context.Context, conn net.Conn) {
 		return
 	}
 	var resp AdminResponse
-	if isWakeOp(f.Request.Op) {
+	switch {
+	case isWakeOp(f.Request.Op):
 		resp = AdministerWake(ctx, s.Authority, s.Wake, *f.Request)
-	} else {
+	case f.Request.Op == OpIssueCloudCode:
+		var at CloudAttempt
+		resp, at = AdministerCloudIssue(s.Authority, s.Endpoints, *f.Request)
+		// Kind and outcome only: never the requester, issue key or code.
+		s.Logf("direct: cloud enrollment request reached this host: %s", at)
+	default:
 		resp = Administer(s.Authority, s.Endpoints, *f.Request)
 	}
 	_ = enc.Encode(adminFrame{Type: "response", Response: &resp})
@@ -322,35 +330,47 @@ func Administer(a *Authority, endpoints []string, req AdminRequest) AdminRespons
 		}
 		return AdminResponse{OK: true, ServerID: a.ServerID(), Cloud: &st}
 	case OpCloudStatus:
-		st := a.CloudStatus()
-		return AdminResponse{OK: true, ServerID: a.ServerID(), Endpoints: endpoints, Cloud: &st}
+		st, act := a.CloudStatus(), a.EnrollActivity()
+		return AdminResponse{OK: true, ServerID: a.ServerID(), Endpoints: endpoints, Cloud: &st, Enroll: &act}
 	case OpIssueCloudCode:
-		if req.Issue == nil {
-			return AdminResponse{Code: CloudErrInvalidRequest, Error: "issuance needs a request"}
-		}
-		if len(endpoints) == 0 {
-			return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance needs a running `amux direct serve` with configured endpoints"}
-		}
-		code, exp, err := a.IssueCloudCode(*req.Issue)
-		if err != nil {
-			var ce *CloudError
-			if errors.As(err, &ce) {
-				return AdminResponse{Code: ce.Code, Error: ce.Msg}
-			}
-			return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
-		}
-		sid := a.ServerID()
-		b := Bundle{V: 1, ServerID: sid, Endpoints: endpoints, Code: code, ExpiresAt: exp}
-		if req.Issue.Handoff == HandoffDeviceTicket {
-			b.V, b.Claim = 2, BundleClaimPKCE
-		}
-		bundle, err := EncodeBundle(b)
-		if err != nil {
-			return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
-		}
-		return AdminResponse{OK: true, Bundle: bundle, ExpiresAt: exp, ServerID: sid, Endpoints: endpoints}
+		resp, _ := AdministerCloudIssue(a, endpoints, req)
+		return resp
 	}
 	return fail(fmt.Errorf("unknown admin operation %q", req.Op))
+}
+
+// AdministerCloudIssue answers one OpIssueCloudCode and records its outcome
+// as the latest cloud attempt, which it also returns (for the server log).
+func AdministerCloudIssue(a *Authority, endpoints []string, req AdminRequest) (AdminResponse, CloudAttempt) {
+	resp := issueCloudCode(a, endpoints, req)
+	return resp, a.noteCloudAttempt(req.Issue, resp)
+}
+
+func issueCloudCode(a *Authority, endpoints []string, req AdminRequest) AdminResponse {
+	if req.Issue == nil {
+		return AdminResponse{Code: CloudErrInvalidRequest, Error: "issuance needs a request"}
+	}
+	if len(endpoints) == 0 {
+		return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance needs a running `amux direct serve` with configured endpoints"}
+	}
+	code, exp, err := a.IssueCloudCode(*req.Issue)
+	if err != nil {
+		var ce *CloudError
+		if errors.As(err, &ce) {
+			return AdminResponse{Code: ce.Code, Error: ce.Msg}
+		}
+		return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
+	}
+	sid := a.ServerID()
+	b := Bundle{V: 1, ServerID: sid, Endpoints: endpoints, Code: code, ExpiresAt: exp}
+	if req.Issue.Handoff == HandoffDeviceTicket {
+		b.V, b.Claim = 2, BundleClaimPKCE
+	}
+	bundle, err := EncodeBundle(b)
+	if err != nil {
+		return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
+	}
+	return AdminResponse{OK: true, Bundle: bundle, ExpiresAt: exp, ServerID: sid, Endpoints: endpoints}
 }
 
 func isWakeOp(op string) bool {
