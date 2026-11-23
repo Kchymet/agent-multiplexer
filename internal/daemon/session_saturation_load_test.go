@@ -38,8 +38,8 @@ func TestSessionRPCSaturationLoad(t *testing.T) {
 	if fixed.controlMissed != 0 {
 		t.Errorf("fixed budget starved %d of %d control calls", fixed.controlMissed, fixed.controlSent)
 	}
-	if fixed.p99 > 1500*time.Millisecond {
-		t.Errorf("fixed budget control p99 = %v, want < 1.5s", fixed.p99)
+	if bound := 1500 * time.Millisecond * raceSlowdown; fixed.p99 > bound {
+		t.Errorf("fixed budget control p99 = %v, want < %v", fixed.p99, bound)
 	}
 	if fixed.filesAfter > fixed.filesPeak/4 {
 		t.Errorf("budget did not recover after the burst: %d of peak %d responses still held", fixed.filesAfter, fixed.filesPeak)
