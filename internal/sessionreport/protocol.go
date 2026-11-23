@@ -11,6 +11,9 @@ const (
 	PermissionResolved = "report-permission-resolved"
 	PermissionClear    = "report-permission-clear"
 	Capture            = "report-capture"
+	// Notice reports a runtime notification amux does not recognize, for the
+	// daemon log only: it changes no state.
+	Notice = "report-notice"
 )
 
 const (
@@ -24,6 +27,7 @@ const (
 	FieldDecision          = "decision"
 	FieldEvent             = "event"
 	FieldRuntimeGeneration = "runtime_generation"
+	FieldNotice            = "notice"
 )
 
 const (
@@ -35,6 +39,7 @@ const (
 	MaxOptionsBytes   = 1 << 10
 	MaxOptionBytes    = 64
 	MaxEventBytes     = 64
+	MaxNoticeBytes    = 128
 	MaxHookInputBytes = 64 << 10
 )
 
@@ -43,7 +48,7 @@ const (
 // operations and must never reach the general wsops action dispatcher.
 func IsVerb(verb string) bool {
 	switch verb {
-	case Activity, Model, Limits, PermissionRequest, PermissionResolved, PermissionClear, Capture:
+	case Activity, Model, Limits, PermissionRequest, PermissionResolved, PermissionClear, Capture, Notice:
 		return true
 	default:
 		return false

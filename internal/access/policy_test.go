@@ -172,6 +172,42 @@ func TestFilterSnapshotUsesResolvedMembershipAndRemovesHostPaths(t *testing.T) {
 	}
 }
 
+// A finished coordinator archives its own workgroup from inside its session:
+// the exact action `amux agent done` (and `amux workgroup archive <own id>`)
+// sends is allowed, while forcing past an open PR, archiving another
+// workgroup, and a member archiving its coordinator are refused.
+func TestCoordinatorSelfArchiveWrapUp(t *testing.T) {
+	p := Policy{Resolver: fakeResolver{resources: map[string]Resource{
+		"wg1": {ID: "wg1", Role: "coordinator", Scope: "work"},
+		"a1":  {ID: "a1", RootID: "wg1", Repo: "api"},
+		"wg2": {ID: "wg2", Role: "coordinator", Scope: "work"},
+	}}}
+	archive := func(who, id string, force bool) error {
+		fields := map[string]string{"archived": "true"}
+		if force {
+			fields["force"] = "true"
+		}
+		return p.Authorize(context.Background(), Principal{Kind: SubjectSession, SubjectID: who},
+			Request{Route: RouteAction, Verb: core.ActionSetArchived, ID: id, Fields: fields})
+	}
+	if err := archive("wg1", "wg1", false); err != nil {
+		t.Fatalf("coordinator self-archive denied: %v", err)
+	}
+	for _, tc := range []struct {
+		name    string
+		who, id string
+		force   bool
+	}{
+		{"self-archive with force", "wg1", "wg1", true},
+		{"archive a foreign workgroup", "wg1", "wg2", false},
+		{"member archives its coordinator", "a1", "wg1", false},
+	} {
+		if err := archive(tc.who, tc.id, tc.force); !errors.Is(err, ErrDenied) {
+			t.Errorf("%s: error = %v, want ErrDenied", tc.name, err)
+		}
+	}
+}
+
 func TestArchivedPrincipalDeniedActionsAndSnapshots(t *testing.T) {
 	resolver := fakeResolver{resources: map[string]Resource{
 		"wg1": {ID: "wg1", Role: "coordinator", Archived: true},

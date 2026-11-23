@@ -49,7 +49,7 @@ func TestHarnessUpdateCheckHonorsModeAndInterval(t *testing.T) {
 	if err := harnessbin.Set(harnessbin.KeyUpdate, harnessbin.UpdateOff); err != nil {
 		t.Fatal(err)
 	}
-	if res := runHarnessUpdateCheck(ctx, m, now); res != nil {
+	if res := runHarnessUpdateCheck(ctx, m, now, nil); res != nil {
 		t.Fatalf("off ran a check: %+v", res)
 	}
 	// Unset is auto, unless the environment opts out.
@@ -57,21 +57,21 @@ func TestHarnessUpdateCheckHonorsModeAndInterval(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(harnessbin.DisableEnv, "1")
-	if res := runHarnessUpdateCheck(ctx, m, now); res != nil {
+	if res := runHarnessUpdateCheck(ctx, m, now, nil); res != nil {
 		t.Fatalf("%s=1 ran a check: %+v", harnessbin.DisableEnv, res)
 	}
 	t.Setenv(harnessbin.DisableEnv, "")
-	if res := runHarnessUpdateCheck(ctx, m, now); len(res) != 1 || !res[0].Updated {
+	if res := runHarnessUpdateCheck(ctx, m, now, nil); len(res) != 1 || !res[0].Updated {
 		t.Fatalf("auto check = %+v", res)
 	}
 	if m.Current("claude") != "1.1.0" {
 		t.Fatalf("current = %q", m.Current("claude"))
 	}
 	src.latest = "1.2.0"
-	if res := runHarnessUpdateCheck(ctx, m, now.Add(time.Hour)); res != nil {
+	if res := runHarnessUpdateCheck(ctx, m, now.Add(time.Hour), nil); res != nil {
 		t.Fatalf("check ran again before the interval: %+v", res)
 	}
-	if res := runHarnessUpdateCheck(ctx, m, now.Add(25*time.Hour)); len(res) != 1 || m.Current("claude") != "1.2.0" {
+	if res := runHarnessUpdateCheck(ctx, m, now.Add(25*time.Hour), nil); len(res) != 1 || m.Current("claude") != "1.2.0" {
 		t.Fatalf("check after interval = %+v current %q", res, m.Current("claude"))
 	}
 }
@@ -109,13 +109,13 @@ func TestHarnessUpdateCheckAdoptsUsedHarnessesByDefault(t *testing.T) {
 	t.Cleanup(func() { harnessAdoptInput = old })
 	ctx := context.Background()
 
-	runHarnessUpdateCheck(ctx, m, now)
+	runHarnessUpdateCheck(ctx, m, now, nil)
 	if m.Current("claude") != "" || m.Current("codex") != "" {
 		t.Fatalf("adopted against an override or an unused harness: claude %q codex %q", m.Current("claude"), m.Current("codex"))
 	}
 	inputs["claude"] = harnessbin.AdoptInput{OnPath: "/usr/local/bin/claude"}
 	t.Setenv(harnessbin.DisableEnv, "1")
-	runHarnessUpdateCheck(ctx, m, now)
+	runHarnessUpdateCheck(ctx, m, now, nil)
 	if m.Current("claude") != "" {
 		t.Fatalf("adopted despite %s", harnessbin.DisableEnv)
 	}
@@ -123,14 +123,14 @@ func TestHarnessUpdateCheckAdoptsUsedHarnessesByDefault(t *testing.T) {
 	if err := harnessbin.Set(harnessbin.KeyUpdate, harnessbin.UpdateNotify); err != nil {
 		t.Fatal(err)
 	}
-	runHarnessUpdateCheck(ctx, m, now)
+	runHarnessUpdateCheck(ctx, m, now, nil)
 	if m.Current("claude") != "" {
 		t.Fatal("notify mode adopted (only auto installs)")
 	}
 	if err := harnessbin.Set(harnessbin.KeyUpdate, ""); err != nil {
 		t.Fatal(err)
 	}
-	runHarnessUpdateCheck(ctx, m, now)
+	runHarnessUpdateCheck(ctx, m, now, nil)
 	if m.Current("claude") != "2.0.0" || m.Current("codex") != "" {
 		t.Fatalf("default adoption: claude %q codex %q", m.Current("claude"), m.Current("codex"))
 	}

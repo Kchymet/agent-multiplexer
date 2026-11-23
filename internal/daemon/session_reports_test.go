@@ -42,6 +42,18 @@ func TestSessionReportVocabularyRejectsAuthorityAndPathFields(t *testing.T) {
 		{"valid activity", access.Request{Route: access.RouteAction, Verb: sessionreport.Activity, Fields: map[string]string{
 			sessionreport.FieldRuntimeGeneration: "generation", sessionreport.FieldState: core.StateReady,
 		}}, true},
+		{"valid notice", access.Request{Route: access.RouteAction, Verb: sessionreport.Notice, Fields: map[string]string{
+			sessionreport.FieldRuntimeGeneration: "generation", sessionreport.FieldNotice: "claude notification_type=new_kind",
+		}}, true},
+		{"empty notice", access.Request{Route: access.RouteAction, Verb: sessionreport.Notice, Fields: map[string]string{
+			sessionreport.FieldRuntimeGeneration: "generation", sessionreport.FieldNotice: " ",
+		}}, false},
+		{"oversized notice", access.Request{Route: access.RouteAction, Verb: sessionreport.Notice, Fields: map[string]string{
+			sessionreport.FieldRuntimeGeneration: "generation", sessionreport.FieldNotice: string(make([]byte, sessionreport.MaxNoticeBytes+1)),
+		}}, false},
+		{"notice carrying a state", access.Request{Route: access.RouteAction, Verb: sessionreport.Notice, Fields: map[string]string{
+			sessionreport.FieldRuntimeGeneration: "generation", sessionreport.FieldNotice: "x", sessionreport.FieldState: core.StateWaiting,
+		}}, false},
 		{"caller id", access.Request{Route: access.RouteAction, Verb: sessionreport.Activity, ID: "other", Fields: map[string]string{
 			sessionreport.FieldRuntimeGeneration: "generation", sessionreport.FieldState: core.StateReady,
 		}}, false},

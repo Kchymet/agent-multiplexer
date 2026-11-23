@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"amux/internal/access"
 	"amux/internal/agent"
@@ -236,12 +237,42 @@ func cmdAgentStatus(args []string, hook bool) error {
 		if err := readHookJSON(&payload); err != nil {
 			return nil
 		}
-		if payload.HookEventName == "Notification" && !claudecfg.NotificationNeedsUser(payload) {
-			return nil // the idle reminder or a login notice: the state stands
+		switch payload.HookEventName {
+		case "Notification":
+			switch claudecfg.ClassifyNotification(payload) {
+			case claudecfg.NotificationIgnored:
+				return nil // the idle reminder or another non-prompt notice: the state stands
+			case claudecfg.NotificationUnrecognized:
+				// Not read as waiting (that would claim the user is needed);
+				// logged by the daemon so a new type gets classified.
+				return hookResult(hook, reportWithin(hook, sessionreport.Notice,
+					map[string]string{sessionreport.FieldNotice: noticeOf(payload)}))
+			}
+		case "PreToolUse":
+			// Installed with an AskUserQuestion matcher; guard against a
+			// Claude that ignores matchers so ordinary tools never read waiting.
+			if payload.ToolName != claudecfg.QuestionTool {
+				return nil
+			}
 		}
 	}
 	return hookResult(hook, reportWithin(hook, sessionreport.Activity,
 		map[string]string{sessionreport.FieldState: args[0]}))
+}
+
+// noticeOf names an unrecognized Claude notification for the daemon log: its
+// type, or — for an untyped (legacy) payload — a bounded prefix of its message.
+func noticeOf(p claudecfg.HookPayload) string {
+	notice := "claude notification_type=" + strings.TrimSpace(p.NotificationType)
+	if strings.TrimSpace(p.NotificationType) == "" {
+		notice = "claude untyped notification: " + strings.TrimSpace(p.Message)
+	}
+	notice = strings.ToValidUTF8(notice, "?")
+	for len(notice) > sessionreport.MaxNoticeBytes {
+		_, size := utf8.DecodeLastRuneInString(notice)
+		notice = notice[:len(notice)-size]
+	}
+	return notice
 }
 
 // cmdAgentPermission reports the lifecycle a Claude hook claims it observed.

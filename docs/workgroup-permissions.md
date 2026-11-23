@@ -23,7 +23,7 @@ AUTHENTICATED HOST OPERATOR  (local TUI, host CLI)      never restricted
 │  may: add-agent (own workgroup, granted repos only)                  │
 │       read member events · start · rename · steer · archive members  │
 │       answer a MEMBER's permission request (never its own)           │
-│       archive the whole workgroup — after explicit user confirmation │
+│       archive the whole workgroup — when wrap-up rules allow (below) │
 │       triage items members raise · escalate them to the console      │
 │  may not: restore · touch another workgroup · change repo grants     │
 │           · steer goal · move/delete/kill · open panes or raw paths  │
@@ -141,18 +141,24 @@ ids, fields and environment variables only ever name a target
 
 ## Group archive: an instruction, not a daemon check
 
-The coordinator's guide, the create-pr skill and the goal-mode docs all say a
-coordinator archives its workgroup only after explicit user confirmation, and
-that a completed goal is not confirmation. That requirement is an agent
-instruction. The daemon cannot observe the conversation: `allowArchive` in
-`scope.go` accepts a coordinator's `set-archived archived=true` on its own id
-on role alone, and `amux agent done` carries no confirmation field. Treat the
-confirmation as a behavioral contract the coordinator is bound to, enforced by
+The coordinator's guide ("Wrapping up this workgroup"), its goal hooks and the
+create-pr skill say when a finished coordinator archives its own workgroup: on
+its own only when every PR is verified MERGED on GitHub and nothing is pending
+(no follow-up, open decision, running member or unanswered user message), and
+otherwise only after asking the user (Claude Code: `AskUserQuestion`; Codex: a
+plain-text question). That requirement is an agent instruction.
+The daemon cannot observe the conversation: `allowArchive` in `scope.go` accepts a coordinator's `set-archived archived=true` on its own id
+on role alone, and `amux agent done` carries no confirmation field. What the
+daemon does enforce: a coordinator can never force its own archive past an open
+member PR, and the archive answers the caller before its runtime is stopped
+(once the turn ends, or after a short grace). Treat the wrap-up rules as a
+behavioral contract the coordinator is bound to, enforced by
 its instructions and reviewable in its transcript, not by policy. The host can
 always restore a workgroup archived early (`amux workgroup unarchive <id>`).
 
-The same holds for open items: the guide has a coordinator triage its inbox
-and, if items remain open, name them to the user before archiving. What the
+The same holds for open items: the guide has a coordinator triage its inbox,
+auto-archive only with nothing left open there, and otherwise ask, naming the
+open items. What the
 daemon does enforce is that none is lost — the archive transaction moves every
 active item in the coordinator's inbox to the console's.
 

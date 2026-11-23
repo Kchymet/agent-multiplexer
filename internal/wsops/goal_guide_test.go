@@ -36,7 +36,7 @@ func TestCoordinatorGuideDescribesItsRealLifecycle(t *testing.T) {
 	if strings.Contains(guide, "amux do unarchive") {
 		t.Error("coordinator guide advertises the host-only amux do unarchive")
 	}
-	assertCompletionLeavesWorkgroupOpen(t, "goal coordinator", guide, "wg1")
+	assertCoordinatorWrapsUp(t, "goal coordinator", guide, "wg1")
 
 	// A Claude coordinator runs in goal mode by default, through amux's hooks:
 	// its guide teaches the amux goal commands and how to get missing input
@@ -71,7 +71,7 @@ func TestCoordinatorGuideDescribesItsRealLifecycle(t *testing.T) {
 			t.Errorf("claude goal coordinator guide mentions %q", forbidden)
 		}
 	}
-	assertCompletionLeavesWorkgroupOpen(t, "claude goal coordinator", hooked, "wg3")
+	assertCoordinatorWrapsUp(t, "claude goal coordinator", hooked, "wg3")
 
 	// A coordinator on a harness with neither goal mechanism is told the truth.
 	plain := store.Session{ID: "wg2", Name: "payments", Agent: "hermes", Dir: "/sandbox/wg2"}
@@ -88,26 +88,57 @@ func TestCoordinatorGuideDescribesItsRealLifecycle(t *testing.T) {
 	if !strings.Contains(other, agent.GoalRuntime) {
 		t.Error("non-goal coordinator guide does not say which runtime does run goals")
 	}
-	assertCompletionLeavesWorkgroupOpen(t, "non-goal coordinator", other, "wg2")
+	assertCoordinatorWrapsUp(t, "non-goal coordinator", other, "wg2")
 }
 
-// Finishing a task must never read as "the workgroup gets archived": on every
-// harness the guide tells the coordinator the workgroup stays open, to ask the
-// user whether to archive it or continue, and to wait for explicit confirmation.
-func assertCompletionLeavesWorkgroupOpen(t *testing.T, kind, guide, id string) {
+// Users ended up with dozens of finished workgroups idling on the dashboard. On
+// every harness a finished coordinator wraps up its own workgroup: it archives
+// itself only when "done" is proven (every PR verified MERGED on GitHub, nothing
+// pending), asks otherwise — closed-unmerged PRs and any doubt included — never
+// forces, and archives as the last step after its final summary.
+func assertCoordinatorWrapsUp(t *testing.T, kind, guide, id string) {
 	t.Helper()
 	// The guide is hard-wrapped prose; match phrases against its unwrapped form.
 	flat := strings.Join(strings.Fields(guide), " ")
 	for _, want := range []string{
-		"does not archive the workgroup",
+		"does not archive the workgroup by itself",
 		"archive every finished member",
-		"ask the user whether to archive the workgroup",
-		"Wait for explicit user confirmation before archiving",
-		"goal completion is not confirmation",
-		"After confirmation, run `amux agent done`",
-		"workgroup (" + id + ")",
+		"## Wrapping up this workgroup",
+		"either archive yourself or ask the user whether to; never just stop",
+		// The root id and where it comes from.
+		"Your workgroup's root id is `" + id + "` (`$AMUX_WORKGROUP` in your environment; `$AMUX_ROOT` is set only for members and is empty for you)",
+		// Auto-archive: every PR verified MERGED from GitHub itself.
+		"**Auto-archive only when ALL of these hold**",
+		"Every PR this workgroup produced is **MERGED**",
+		"`gh pr view <n> --repo <owner/repo> --json state,mergedAt`",
+		"never trust \"opened\", \"ready\", or a member's word",
+		"A PR **closed without merging is not done**: ask.",
+		"no follow-up pending or offered, no open decision, no member running (`amux status --json`), no unanswered user message, and nothing left open in the PR ledger",
+		// Ask on any doubt.
+		"**Ask instead — do not auto-archive — when ANY of these is true:**",
+		"trailing questions, offered follow-ups, or open decisions",
+		"several PRs and any one is not merged, or the set of PRs is unclear",
+		"any uncertainty at all about being done",
+		"failing CI that was merged anyway, work handed to another workgroup",
+		"When in doubt, ask; never guess.",
+		"**Never archive** while a member is still running, or while the user's last message is unanswered",
+		"Never pass `--force`",
+		// The command and the safe order.
+		"`amux agent done` is the command: it archives this workgroup (" + id + ") and its direct members",
+		"the host's `amux workgroup archive " + id + "`",
+		"Write the final summary to `COORDINATION.md`",
+		"run `amux agent done` as the **last** tool call of the turn",
+		"stops your runtime only once the turn has ended",
+		"If it fails (for example an open PR), the workgroup stays open: report the error and ask the user instead.",
 		"Restoration is host-only",
 		"Previously completed members stay archived",
+		// The question and its three answers.
+		"### Asking whether to archive",
+		"**Archive now**",
+		"**Keep open: waiting on my PR merge**",
+		"once every PR is MERGED and nothing else is pending, archive without asking again",
+		"A PR closed without merging, or anything new, means you ask again.",
+		"**Keep open: I have more work**",
 	} {
 		if !strings.Contains(flat, want) {
 			t.Errorf("%s guide missing %q", kind, want)
@@ -115,13 +146,58 @@ func assertCompletionLeavesWorkgroupOpen(t *testing.T, kind, guide, id string) {
 	}
 	for _, forbidden := range []string{
 		"Never archive this workgroup yourself",
+		"Wait for explicit user confirmation before archiving",
+		"goal completion is not confirmation",
 		"automatically marks the workgroup done",
-		"marks the workgroup done",
 		"stops its coordinator and members",
+		"archive yourself with --force",
 	} {
 		if strings.Contains(flat, forbidden) {
-			t.Errorf("%s guide still promises auto-archive: %q", kind, forbidden)
+			t.Errorf("%s guide still carries stale archive wording: %q", kind, forbidden)
 		}
+	}
+}
+
+// The wrap-up question uses each harness's mechanism that actually reaches the
+// user on every client, and "waiting on my PR merge" keeps a wake-up path: a
+// completed Claude goal takes no PR wake-ups, so it must wait instead.
+func TestCoordinatorWrapUpAskAndWaitPerHarness(t *testing.T) {
+	flat := func(s store.Session) string {
+		return strings.Join(strings.Fields(coordinatorGuide(s)), " ")
+	}
+	claude := flat(store.Session{ID: "wg3", Agent: agent.HookGoalRuntime, Dir: "/s/wg3"})
+	for _, want := range []string{
+		"Use the native question UI, the `AskUserQuestion` tool",
+		"web dashboard and the Android app",
+		"First run `amux agent goal ask \"Archive this workgroup?\"`",
+		"do not complete the goal (a completed goal gets no PR wake-ups)",
+		"`amux agent goal wait \"awaiting the user's merge of <repo#PR, …>\"`",
+	} {
+		if !strings.Contains(claude, want) {
+			t.Errorf("claude wrap-up missing %q", want)
+		}
+	}
+	codex := flat(store.Session{ID: "wg1", Agent: agent.GoalRuntime, Dir: "/s/wg1"})
+	plain := flat(store.Session{ID: "wg2", Agent: "hermes", Dir: "/s/wg2"})
+	for name, guide := range map[string]string{"codex": codex, "plain": plain} {
+		for _, want := range []string{
+			"Ask in plain text in your final message",
+			"Do not use `request_user_input` for this question",
+			"`amux agent wait <member>... --timeout 30m`",
+		} {
+			if !strings.Contains(guide, want) {
+				t.Errorf("%s wrap-up missing %q", name, want)
+			}
+		}
+		if strings.Contains(guide, "AskUserQuestion") && name == "codex" {
+			t.Errorf("%s wrap-up teaches Claude's AskUserQuestion", name)
+		}
+	}
+	if !strings.Contains(codex, "Mark the goal complete with `update_goal` first") {
+		t.Error("codex wrap-up lets the goal continue while it waits for the answer")
+	}
+	if strings.Contains(plain, "update_goal") {
+		t.Error("plain wrap-up teaches update_goal")
 	}
 }
 

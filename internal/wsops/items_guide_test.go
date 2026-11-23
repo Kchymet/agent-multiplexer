@@ -43,7 +43,8 @@ func TestCoordinatorGuideTriagesItems(t *testing.T) {
 			"Do not escalate what you can resolve",
 			"goes up as items from you (yours go to the console)",
 			"Archiving this workgroup carries every item still open or acknowledged in your inbox to the console",
-			"If items are still open in your inbox, do not archive on your own",
+			"No open item in your inbox: `amux agent items --inbox` lists none",
+			"any item still open or acknowledged in your inbox — name each in the question, and say that archiving hands it to the console's inbox",
 		} {
 			if !strings.Contains(flat, want) {
 				t.Errorf("%s coordinator guide lacks %q", root.Agent, want)

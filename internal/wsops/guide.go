@@ -375,8 +375,9 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
   Restoring an archived member or this workgroup requires the host. It is refused
   while the member still owns an open PR; add `+"`-f force=true`"+` only to
   deliberately orphan it.
-- After explicit user confirmation, `+"`amux agent done`"+` archives your own
-  workgroup, including its direct members. It cannot archive a foreign workgroup.
+- `+"`amux agent done`"+` archives your own workgroup (`+"`%s`"+`), including its direct
+  members, only as "Wrapping up this workgroup" allows; never with `+"`--force`"+`.
+  It cannot archive a foreign workgroup.
 - Every member commits on its own branch (`+"`%s`"+`) and ships through a
   pull request; review its authenticated session view and PR evidence, not only
   the member's summary. A member marks its PR ready for review
@@ -451,7 +452,7 @@ extensions):
   children first. If a child was closed because its base vanished, open a fresh
   PR from the same head against the landing branch and link the old one.
 
-`, name, name, root.ID, root.Dir, guideRegenNote, root.ID, core.BranchFor(root.ID, "<member>"), core.BranchFor(root.ID, "<predecessor>"))
+`, name, name, root.ID, root.Dir, guideRegenNote, root.ID, root.ID, core.BranchFor(root.ID, "<member>"), core.BranchFor(root.ID, "<predecessor>"))
 	b.WriteString(goalSection(root))
 	b.WriteString("\n")
 	b.WriteString(memberArchiveSection(root))
@@ -623,8 +624,8 @@ func launchStamp() string { return time.Now().Format("2006-01-02 15:04 MST") }
 
 // memberArchiveSection makes archiving finished members part of the
 // coordinator's job. Without it long-done workgroups keep showing live members
-// on the rail. It covers members only; self/workgroup archive still waits for
-// the user (completionSection).
+// on the rail. It covers members only; archiving the workgroup itself follows
+// wrapUpSection.
 func memberArchiveSection(root store.Session) string {
 	return `## Archiving finished members
 Archive each member as soon as it is finished; do not leave it on the rail:
@@ -642,7 +643,7 @@ Archive each member as soon as it is finished; do not leave it on the rail:
   follow-up on the same branch). Note it in ` + "`COORDINATION.md`" + ` and in your
   report with the reason.
 - This covers members only. Archiving yourself and the workgroup
-  (` + "`amux agent done`" + `) still needs explicit user confirmation.
+  (` + "`amux agent done`" + `) follows "Wrapping up this workgroup".
 `
 }
 
@@ -673,41 +674,152 @@ for only what you hold, ` + "`--all`" + ` to include closed ones);
   report instead of burying the substance in prose.
 - **Never leave your inbox untriaged at the end of a task.** Archiving this
   workgroup carries every item still open or acknowledged in your inbox to the
-  console, so nothing is lost — but triage first (see "Finishing a task").
+  console, so nothing is lost — but triage first (see "Wrapping up this
+  workgroup").
 `
 }
 
-// Task completion never implies archive permission. A coordinator must ask for
-// explicit user confirmation before using its authenticated self-archive path.
+// completionSection is what a coordinator does when a task is finished: hand
+// off, summarize, then wrap up its own workgroup (wrapUpSection) instead of
+// idling on the rail forever.
 func completionSection(root store.Session) string {
-	return fmt.Sprintf(`## Finishing a task
-Finishing a task does not archive the workgroup: this workgroup and you stay on
-the active rail. A task is finished only when every member PR it produced is
-**merged or closed**, or explicitly handed to the user. Before you hand a PR
-off, check that it is green and marked ready for review
-(`+"`gh pr view <n> --json isDraft`"+` prints false), not left in draft, with nothing
-outstanding but the human step; the user merges unless the task authorizes
-merging. Before you call a task finished, archive every finished member (see
-"Archiving finished members"). End each finished task with your final summary:
-the PR ledger (each member PR's URL and state), and for every PR still open,
-exactly what needs a human (e.g. merge approval, a design decision). Raise the
-task's remaining follow-ups, risks and open decisions as items and triage your
-inbox first (see "Triage upward items"); the summary lists the item ids you
-raised or escalated. Then ask the user whether to archive the workgroup or give
-it another task. If items are still open in your inbox, do not archive on your
-own: say which, and that archiving hands them to the console's inbox (it does,
-in the same step, so none is lost). Wait for explicit
-user confirmation before archiving; goal completion is not confirmation.
-After confirmation, run `+"`amux agent done`"+`: your authenticated identity selects
-this workgroup (%s), and the daemon durably archives you and its direct members
-before stopping runtimes. Report success only when the command confirms it.
-Do not delegate self-archive to a member: a member's `+"`amux agent done`"+` archives
-only that member. Archiving finished members (PR merged or closed) with
-`+"`amux do set-archived <member> -f archived=true`"+` needs no confirmation; a
-member whose PR is still open keeps babysitting it.
-Restoration is host-only: restoring the workgroup restores previously active
-members too. Previously completed members stay archived.
-`, root.ID)
+	return `## Finishing a task
+Finishing a task does not archive the workgroup by itself. A task is finished
+only when every member PR it produced is **merged or closed**, or explicitly
+handed to the user. Before you hand a PR off, check that it is green and marked
+ready for review (` + "`gh pr view <n> --json isDraft`" + ` prints false), not left in
+draft, with nothing outstanding but the human step; the user merges unless the
+task authorizes merging. Before you call a task finished, archive every finished
+member (see "Archiving finished members"). End each finished task with your
+final summary: the PR ledger (each member PR's URL and state), and for every PR
+still open, exactly what needs a human (e.g. merge approval, a design decision).
+Raise the task's remaining follow-ups, risks and open decisions as items and
+triage your inbox (see "Triage upward items"); the summary lists the item ids
+you raised, escalated or left open.
+Archiving finished members (PR merged or closed) with
+` + "`amux do set-archived <member> -f archived=true`" + ` needs no confirmation; a
+member whose PR is still open keeps babysitting it. Then wrap up the workgroup.
+
+` + wrapUpSection(root)
+}
+
+// wrapUpSection makes a finished coordinator close its own workgroup instead of
+// sitting idle forever: it archives itself only when "done" is proven, and
+// otherwise asks the user with its harness's question mechanism. Both goal
+// runtimes get the same rules; only the asking and waiting mechanics differ.
+func wrapUpSection(root store.Session) string {
+	return fmt.Sprintf(`## Wrapping up this workgroup
+A finished workgroup must not sit idle on the rail forever. When a task is
+finished, either archive yourself or ask the user whether to; never just stop.
+Your workgroup's root id is `+"`%s`"+` (`+"`$AMUX_WORKGROUP`"+` in your environment;
+`+"`$AMUX_ROOT`"+` is set only for members and is empty for you).
+
+**Auto-archive only when ALL of these hold** — verify each yourself, now:
+- Every PR this workgroup produced is **MERGED**. Check GitHub yourself for each
+  ledger row (`+"`gh pr view <n> --repo <owner/repo> --json state,mergedAt`"+` shows
+  state MERGED and a mergedAt time); never trust "opened", "ready", or a
+  member's word. A PR **closed without merging is not done**: ask.
+- No outstanding work: no follow-up pending or offered, no open decision, no
+  member running (`+"`amux status --json`"+`), no unanswered user message, and
+  nothing left open in the PR ledger.
+- No open item in your inbox: `+"`amux agent items --inbox`"+` lists none (each
+  was resolved, dismissed or escalated to the console).
+
+**Ask instead — do not auto-archive — when ANY of these is true:**
+- trailing questions, offered follow-ups, or open decisions;
+- any item still open or acknowledged in your inbox — name each in the
+  question, and say that archiving hands it to the console's inbox;
+- several PRs and any one is not merged, or the set of PRs is unclear;
+- any uncertainty at all about being done: partial results, skipped steps,
+  failing CI that was merged anyway, work handed to another workgroup, a member
+  idle with an unclear outcome, the user seeming to want to keep talking.
+When in doubt, ask; never guess.
+
+**Never archive** while a member is still running, or while the user's last
+message is unanswered (answer it first). Never pass `+"`--force`"+` (or
+`+"`-f force=true`"+`) to archive yourself: amux refuses to archive the workgroup
+while a member PR is open, and only the user may override that from the host.
+
+### Archiving yourself
+`+"`amux agent done`"+` is the command: it archives this workgroup (%s) and its
+direct members, and your authenticated identity selects the workgroup, so it
+takes no id and cannot reach another workgroup. (It is the self-scoped form of
+the host's `+"`amux workgroup archive %s`"+`; use `+"`amux agent done`"+`.) Do it in
+this order, because the runtime is stopped shortly after the archive commits:
+1. Write the final summary to `+"`COORDINATION.md`"+`: outcome, PR ledger with
+   each PR's verified final state, and anything left for the user.
+   Anything left for the user is raised as an item (or escalated); archiving
+   moves every item still open in your inbox to the console's, so none is lost.
+2. Archive every finished member; complete your goal if you are in goal mode.
+3. Write your final message (the summary and the PR ledger with URLs), then
+   run `+"`amux agent done`"+` as the **last** tool call of the turn. amux returns its
+   answer first and stops your runtime only once the turn has ended (or after a
+   short grace), so nothing after it is guaranteed to be delivered; at most add
+   one line confirming the archive.
+If it fails (for example an open PR), the workgroup stays open: report the
+error and ask the user instead. Report success only when the command confirms
+it. Do not delegate self-archive to a member: a member's `+"`amux agent done`"+`
+archives only that member. Restoration is host-only: restoring the workgroup
+restores previously active members too. Previously completed members stay
+archived.
+
+### Asking whether to archive
+%s
+Offer exactly these options:
+- **Archive now** — archive as above. Items still open in your inbox move to the
+  console's inbox. While a member PR is still open amux
+  refuses; say so and leave the override to the user.
+- **Keep open: waiting on my PR merge** — %s On each wake, re-verify the ledger
+  from GitHub: once every PR is MERGED and nothing else is pending, archive
+  without asking again. A PR closed without merging, or anything new, means you
+  ask again.
+- **Keep open: I have more work** — finish your summary, complete your goal if
+  you are in goal mode and have not yet, and end the turn; the user's next
+  message is the next task.
+`, root.ID, root.ID, root.ID, wrapUpAsk(root), wrapUpWaitMerge(root))
+}
+
+// wrapUpAsk is how a coordinator asks the wrap-up question on its harness.
+// Claude's AskUserQuestion reaches web/Android as a tool call there, and a text
+// answer from those clients dismisses the selector before it is typed (#316).
+// Codex's request_user_input is left open for an attached Codex client and shows
+// on web/Android only as a notice they cannot answer (codexapp.handleUserInput),
+// so a Codex coordinator asks in plain text instead.
+func wrapUpAsk(root store.Session) string {
+	if agent.HookGoals(root) {
+		return `Use the native question UI, the ` + "`AskUserQuestion`" + ` tool (it also reaches the
+web dashboard and the Android app). First run
+` + "`amux agent goal ask \"Archive this workgroup?\"`" + ` so a reply typed from any client
+is attached to your goal instead of replacing it; then ask with
+` + "`AskUserQuestion`" + `, stating briefly what is done and what is still open.`
+	}
+	return `Ask in plain text in your final message, naming what is done, what is still open,
+and the three options below, then end the turn; the user's reply arrives as your
+next task. (Do not use ` + "`request_user_input`" + ` for this question: amux leaves it
+open for an attached terminal, and the web dashboard and the Android app only
+see a notice they cannot answer.)` + codexAskGoalNote(root)
+}
+
+func codexAskGoalNote(root store.Session) string {
+	if agent.NativeGoals(root) {
+		return ` Mark the goal complete with ` + "`update_goal`" + ` first, so it
+is not continued while you wait for the answer.`
+	}
+	return ""
+}
+
+// wrapUpWaitMerge is how a coordinator waits for the user's merge without
+// polling. A completed goal takes no PR wake-ups, so a Claude coordinator keeps
+// its goal waiting; Codex and plain coordinators block on amux's own events.
+func wrapUpWaitMerge(root store.Session) string {
+	if agent.HookGoals(root) {
+		return `do not complete the goal (a completed goal gets no PR
+  wake-ups). Run ` + "`amux agent goal wait \"awaiting the user's merge of <repo#PR, …>\"`" + `
+  and end the turn; amux wakes you when those PRs merge, close or change.`
+	}
+	return `keep the task open and block on amux's own events
+  instead of polling: ` + "`amux agent wait <member>... --timeout 30m`" + ` on the members
+  owning those PRs returns when their PRs change.`
 }
 
 // goalSection tells a coordinator how its task lifecycle actually works. On the
@@ -745,10 +857,11 @@ never need `+"`create_goal`"+`; `+"`get_goal`"+` shows the objective, status, bu
 - Call `+"`update_goal`"+` with status `+"`complete`"+` only when the objective is true and
   verified — never because you are stopping, out of ideas, or near a budget.
   Archive every finished member first (see "Archiving finished members");
-  completing the goal does not do it for you. The completed goal stays visible
-  on the thread and this workgroup stays open (see "Finishing a task"). Finish
-  all member work and give your final summary before ending that turn; the user's
-  next task becomes a fresh goal with its own accounting.
+  completing the goal does not do it for you, and it does not archive the
+  workgroup: wrap up as "Wrapping up this workgroup" says (archive yourself only
+  when every PR is verified merged and nothing is pending; otherwise ask). Give
+  your final summary before ending that turn; the user's next task becomes a
+  fresh goal with its own accounting.
 - Ask the user only for genuine input (`+"`request_user_input`"+`); an open question is
   not a reason to shrink the objective. Use status `+"`blocked`"+` only after the same
   blocker repeats across consecutive goal turns, as the tool describes.
@@ -787,10 +900,12 @@ status.
 - Run `+"`amux agent goal complete \"<summary>\"`"+` only when the objective is true
   and verified — never because you are stopping, out of ideas, or near the
   continuation budget. Archive every finished member first (see "Archiving
-  finished members"). Completing the goal does not archive the workgroup (see
-  "Finishing a task"). When unarchived idle members remain, it lists them with
+  finished members"). When unarchived idle members remain, it lists them with
   the archive command: archive the finished ones, or say why each is kept, in
-  your final summary in the same turn.
+  your final summary in the same turn. Completing the goal does not archive the
+  workgroup: wrap up as "Wrapping up this workgroup" says (archive yourself only
+  when every PR is verified merged and nothing is pending; otherwise ask before
+  completing the goal, since a completed goal gets no PR wake-ups).
 
 ### Getting what you need from the user
 Before dispatching work, check the task for gaps. When the task is missing

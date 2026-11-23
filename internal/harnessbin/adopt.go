@@ -76,8 +76,16 @@ type AdoptResult struct {
 	Kind    string
 	Adopted bool
 	Version string
+	// Decided reports whether the rules allowed adoption (Reason says why,
+	// either way); Adopted reports whether the install then succeeded.
+	Decided bool
 	Reason  string
 	Err     error
+	// Input is what the rules were given, so callers can explain a decline.
+	Input AdoptInput
+	// RecordErr is a failure to persist the decision or outcome to the kind's
+	// state (which `amux harness ls` and `amux doctor` report).
+	RecordErr error
 }
 
 // Adopt runs the adoption rules for every supported kind and installs and
@@ -85,16 +93,27 @@ type AdoptResult struct {
 // channel's (harnesses.<kind>.channel, else the source default), or the
 // user's own version when that is newer, so adopting never moves new sessions
 // to an older release than the user already ran.
-func (m *Manager) Adopt(ctx context.Context, settings Settings, input func(kind string) AdoptInput) []AdoptResult {
+//
+// Every decision, declines included, is recorded in the kind's state with its
+// reason and time, and an attempt is marked in progress until it finishes, so
+// a skipped, failed or stuck adoption is diagnosable afterwards. Each decided
+// callback is called with the kind's decision before its install starts.
+func (m *Manager) Adopt(ctx context.Context, settings Settings, input func(kind string) AdoptInput, decided ...func(AdoptResult)) []AdoptResult {
 	var out []AdoptResult
 	for _, kind := range Kinds {
 		in := input(kind)
 		ok, why := m.AdoptDecision(kind, in)
-		r := AdoptResult{Kind: kind, Reason: why}
+		r := AdoptResult{Kind: kind, Decided: ok, Reason: why, Input: in}
+		r.RecordErr = m.recordAdoptDecision(kind, ok, why)
+		for _, f := range decided {
+			f(r)
+		}
 		if ok {
 			r.Version, r.Err = m.adopt(ctx, kind, settings.Kind(kind).Channel, in.PathVersion)
 			r.Adopted = r.Err == nil
-			_ = m.recordAdopt(kind, r.Err)
+			if err := m.recordAdopt(kind, r.Err); err != nil && r.RecordErr == nil {
+				r.RecordErr = err
+			}
 		}
 		out = append(out, r)
 	}
@@ -140,6 +159,34 @@ func (m *Manager) adoptInstall(ctx context.Context, kind, version string) (strin
 	return version, m.activateLocked(kind, version)
 }
 
+// AdoptDecisionAdopt and AdoptDecisionSkip are State.AdoptDecision values.
+const (
+	AdoptDecisionAdopt = "adopt"
+	AdoptDecisionSkip  = "skip"
+)
+
+// recordAdoptDecision persists one adoption decision. An allowed adoption is
+// also marked in progress (AdoptStartedAt) until recordAdopt records how it
+// ended.
+func (m *Manager) recordAdoptDecision(kind string, ok bool, why string) error {
+	if !Supported(kind) {
+		return nil
+	}
+	unlock, err := m.lock(kind)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	st := m.LoadState(kind)
+	st.AdoptCheckedAt = m.now().UTC()
+	st.AdoptDecision, st.AdoptReason = AdoptDecisionSkip, why
+	if ok {
+		st.AdoptDecision = AdoptDecisionAdopt
+		st.AdoptStartedAt = st.AdoptCheckedAt
+	}
+	return m.saveState(kind, st)
+}
+
 func (m *Manager) recordAdopt(kind string, adoptErr error) error {
 	unlock, err := m.lock(kind)
 	if err != nil {
@@ -148,6 +195,7 @@ func (m *Manager) recordAdopt(kind string, adoptErr error) error {
 	defer unlock()
 	st := m.LoadState(kind)
 	st.AdoptAttemptAt = m.now().UTC()
+	st.AdoptStartedAt = time.Time{}
 	st.AdoptError = ""
 	if adoptErr != nil {
 		st.AdoptError = adoptErr.Error()
