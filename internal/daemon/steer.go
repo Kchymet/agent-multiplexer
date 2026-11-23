@@ -230,13 +230,15 @@ func (d *Daemon) steerPTY(ctx context.Context, a core.Action, verb string, h age
 	if verb != core.SteerPrompt {
 		return fmt.Errorf("agent %s is not running (only %q starts a stopped agent)", a.ID, core.SteerPrompt)
 	}
-	// Everything this verb can be refused for has now been checked, so it is
-	// accepted — and the cold start it needs takes seconds (a Claude Code boot),
-	// which is far longer than the caller will wait. Hand the start to a goroutine
-	// and return: the relay that carried this verb answers immediately, and the
-	// progress arrives on the session's runtime-events stream instead.
+	// Everything this verb can be refused for has now been checked. The cold
+	// start it needs takes seconds (a Claude Code boot) and reacquires the
+	// session's admission, so it runs as deferred work. A caller that can wait
+	// gets its outcome as the action's result once handle has released the
+	// action's admission (steer_verify.go): "ok" only once the runtime is up and
+	// took the prompt. Progress also reaches the session's runtime-events stream.
+	report := coldStartReporter(ctx)
 	if !d.startDeferredContext(ctx, func(workCtx context.Context) {
-		d.startForSteer(workCtx, a.ID, key, payload)
+		d.startForSteer(workCtx, a.ID, key, payload, report)
 	}) {
 		return context.Canceled
 	}
@@ -387,10 +389,18 @@ func (d *Daemon) steerStructured(ctx context.Context, id string, sup structuredS
 // acknowledged. Like startForSteer it runs under the daemon's lifetime (not the
 // caller's connection) and reports any failure to the session journal — the
 // caller has already been told "accepted".
-func (d *Daemon) runStructuredPrompt(ctx context.Context, id string, sup structuredSteerer, text string) {
+func (d *Daemon) runStructuredPrompt(ctx context.Context, id string, sup structuredSteerer, text string, onBegin ...func(error)) {
+	begun := func(err error) {
+		for _, f := range onBegin {
+			if f != nil {
+				f(err)
+			}
+		}
+	}
 	starter, ok := sup.(structuredPromptStarter)
 	if !ok {
 		structuredJournal(id, core.JournalError, "prompt cancelled: runtime lacks bounded admission")
+		begun(fmt.Errorf("prompt to %s cancelled: runtime lacks bounded admission", id))
 		return
 	}
 	var wait func(context.Context) error
@@ -410,8 +420,11 @@ func (d *Daemon) runStructuredPrompt(ctx context.Context, id string, sup structu
 	})
 	if err != nil {
 		structuredJournal(id, core.JournalError, fmt.Sprintf("prompt cancelled before turn start: %v", err))
+		begun(fmt.Errorf("prompt to %s cancelled before turn start: %w", id, err))
 		return
 	}
+	// turn/start was accepted: the runtime took the prompt.
+	begun(nil)
 	if d.steerStarted != nil {
 		defer func() {
 			select {
@@ -434,6 +447,9 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 	if text == "" {
 		return fmt.Errorf("%s: need %q", core.SteerPrompt, core.SteerText)
 	}
+	// Like the PTY cold start, a caller that can wait gets the outcome: "ok"
+	// once the App Server is up and accepted turn/start (steer_verify.go).
+	report := coldStartReporter(ctx)
 	if !d.startDeferredContext(ctx, func(workCtx context.Context) {
 		structuredJournal(sess.ID, core.JournalInfo, "starting agent")
 		var sup *codexapp.Supervisor
@@ -447,11 +463,15 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 			// failure on the session's single structured event source so a subscriber
 			// waiting on the first turn sees why it never came.
 			structuredNotice(sess.ID, core.JournalError, fmt.Sprintf("start agent %s: %v", sess.ID, err))
-			d.steerStartFailed(sess.ID, fmt.Errorf("start agent %s: %w", sess.ID, err))
+			err = fmt.Errorf("start agent %s: %w", sess.ID, err)
+			d.steerStartFailed(sess.ID, err)
+			if report != nil {
+				report(err)
+			}
 			return
 		}
 		d.triggerPoll()
-		d.runStructuredPrompt(workCtx, sess.ID, sup, text)
+		d.runStructuredPrompt(workCtx, sess.ID, sup, text, report)
 	}) {
 		return context.Canceled
 	}
@@ -470,16 +490,21 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 // sent the verb is gone the moment it reads the ack, and a start cancelled by
 // its disconnect would leave the session exactly as stuck as the timeout this
 // change exists to remove.
-func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, payload []engine.InputStep) {
-	if d.steerStarted != nil {
-		defer func() {
+//
+// After the start it waits (outside any admission) until the runtime takes the
+// prompt, and reports that outcome through report: the waiting caller's result.
+func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, payload []engine.InputStep, report func(error)) {
+	started := func() {
+		if d.steerStarted != nil {
 			select {
 			case d.steerStarted <- id:
 			default:
 			}
-		}()
+		}
 	}
 	journal(id, core.JournalInfo, "starting agent")
+	var in engine.Instance
+	var queued time.Time
 	// Start exactly the steered session: a prompt to a workgroup id is a prompt to
 	// its coordinator, not a "start every member" (which is what `start <root>`
 	// means — see startEngineFor).
@@ -490,10 +515,12 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 		if err := d.startAgentWith(admitCtx, id, startIntent{}); err != nil {
 			return err
 		}
-		in, ok := d.engine.Lookup(key)
-		if !ok {
+		var ok bool
+		in, ok = d.engine.Lookup(key)
+		if !ok || in == nil || !in.Alive() {
 			return fmt.Errorf("agent %s did not come up", id)
 		}
+		queued = time.Now()
 		// This is the one typed path that skips deliverTyped's composer check: the
 		// runtime was started for this very prompt, so its composer holds no one's
 		// draft (and has not been painted yet to read).
@@ -506,10 +533,26 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 		return nil
 	})
 	if err != nil {
-		d.steerStartFailed(id, fmt.Errorf("start agent %s: %w", id, err))
+		err = fmt.Errorf("start agent %s: %w", id, err)
+		d.steerStartFailed(id, err)
+		started()
+		if report != nil {
+			report(err)
+		}
 		return
 	}
 	d.triggerPoll()
+	started()
+	if report == nil {
+		return // nobody waits on the outcome: keep the old acknowledgement
+	}
+	if err := d.awaitPromptAck(ctx, id, in, queued, submitBy(queued, payload)); err != nil {
+		d.steerStartFailed(id, err)
+		report(err)
+		return
+	}
+	journal(id, core.JournalInfo, "agent started and took the prompt")
+	report(nil)
 }
 
 // admitDeferredEffect reacquires id's admission even when ctx was captured

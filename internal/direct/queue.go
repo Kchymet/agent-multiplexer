@@ -850,7 +850,7 @@ func (s *Server) writeQueuePrecheckErr(w http.ResponseWriter, l *Lease, err erro
 func (s *Server) serveWatch(w http.ResponseWriter, r *http.Request, frame func(context.Context, *Lease) (any, error)) {
 	up := websocket.Upgrader{
 		HandshakeTimeout: 10 * time.Second,
-		CheckOrigin:      func(r *http.Request) bool { o := r.Header.Get("Origin"); return o == "" || s.origins[o] },
+		CheckOrigin:      func(r *http.Request) bool { o := r.Header.Get("Origin"); return o == "" || s.originAllowed(o) },
 	}
 	conn, err := up.Upgrade(w, r, nil)
 	if err != nil {

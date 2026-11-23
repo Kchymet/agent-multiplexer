@@ -13,9 +13,12 @@ Format: `#` header lines, a `---8<---` line, then the body.
   the header says what it is modeled on).
 - `want-state` (`free` | `draft` | `dialog` | `unknown`), `want-busy`,
   `want-text` (Go-quoted composer text) — the expected classification.
+- `want-typed` (Go-quoted) — instead of `want-text`: the text amux typed,
+  which the classified composer text must match as typing renders it
+  (`composer.MatchTyped`: backslash continuations, soft wraps, placeholders).
 - `encoding: raw` — the body is the byte stream itself.
 - `encoding: escaped` — each body line is the inside of a Go string literal
-  (`\x1b`, ` `, `\"`); lines are joined with CR LF, and `{{RULE}}` expands
+  (`\x1b`, `\u00a0`, `\"`); lines are joined with CR LF, and `{{RULE}}` expands
   to a rule the width of the pane.
 
 Why some are reconstructed: a nested Claude Code could not be launched from

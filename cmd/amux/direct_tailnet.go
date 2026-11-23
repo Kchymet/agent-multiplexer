@@ -19,6 +19,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/direct"
 	"amux/internal/directsvc"
+	"amux/internal/provider"
 	"amux/internal/providercfg"
 	"amux/internal/tailnet"
 )
@@ -201,10 +202,12 @@ func prepareTailnet(ctx context.Context, fs *flag.FlagSet, t *tailnetFlags, s *d
 	}
 	explicit = slices.DeleteFunc(slices.Clone(explicit), func(o string) bool { return o == "" })
 	tn.DefaultOrigin, tn.OriginSource = "", ""
-	if !*t.noDefault {
+	if *t.noDefault {
+		tn.OriginSource = originDefaultDisabled
+	} else {
 		origin, source, err := defaultOrchestratorOrigin()
 		if err != nil {
-			fmt.Fprintf(out, "origins   no default browser origin: %v\n          pass --allow-origin <exact origin of your orchestrator's web app> for browser clients\n", err)
+			fmt.Fprintf(out, "origins   no default browser origin yet: %v\n          the Harness web origin is allowed once amux provide registers; or pass --allow-origin <exact origin of the Harness web app>\n", err)
 		} else {
 			tn.DefaultOrigin, tn.OriginSource = origin, source
 		}
@@ -274,9 +277,56 @@ func ensureTailnetCert(ctx context.Context, c *tailnet.Client, node tailnet.Node
 	return info, "obtained from tailscaled for " + node.DNSName + skipped, nil
 }
 
-// defaultOrchestratorOrigin derives the orchestrator web app's origin from
-// provider.toml, returning it canonical and where it came from.
+// originDefaultDisabled is TailnetSettings.OriginSource after
+// --no-default-origin: no default origin, and no live webOrigin either.
+const originDefaultDisabled = "none (--no-default-origin)"
+
+// providerWebOrigin is the Harness web app's origin from the provider's latest
+// accepted registration (registered.webOrigin), or "" when unknown or not an
+// exact canonical origin.
+func providerWebOrigin() string {
+	st, err := provider.ReadStatus(provider.StatusPath())
+	if err != nil || st.WebOrigin == "" {
+		return ""
+	}
+	if c, err := direct.CanonicalOrigin(st.WebOrigin, true); err == nil && c == st.WebOrigin {
+		return c
+	}
+	return ""
+}
+
+// liveWebOrigins supplies the provider's current webOrigin to a running
+// tailnet direct server (direct.Config.ExtraOrigins), re-read at most every
+// few seconds, so a registration that names it (or changes it) is honored
+// without a restart.
+func liveWebOrigins() func() []string {
+	var mu sync.Mutex
+	var at time.Time
+	var cached string
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		if time.Since(at) > 5*time.Second {
+			cached, at = providerWebOrigin(), time.Now()
+		}
+		if cached == "" {
+			return nil
+		}
+		return []string{cached}
+	}
+}
+
+// defaultOrchestratorOrigin is the browser origin --tailnet allows by
+// default: the Harness web origin from the provider's registration
+// (registered.webOrigin) when known. Otherwise it falls back to deriving one
+// from provider.toml's orchestrator address, which is the provider endpoint and
+// not always the web app's origin; then --allow-origin <Harness web origin>
+// is the fix (the running server also allows webOrigin as soon as a
+// registration names it).
 func defaultOrchestratorOrigin() (origin, source string, err error) {
+	if o := providerWebOrigin(); o != "" {
+		return o, "the Harness registration (registered.webOrigin)", nil
+	}
 	cfg, err := providercfg.Load()
 	if errors.Is(err, os.ErrNotExist) {
 		return "", "", fmt.Errorf("no provider is configured (%s)", providercfg.Path())
@@ -464,11 +514,15 @@ func settingsServeConfig(s directsvc.Settings) (direct.ServeConfig, error) {
 	if err != nil {
 		return direct.ServeConfig{}, err
 	}
-	return direct.ServeConfig{
+	cfg := direct.ServeConfig{
 		Listen: s.Listen, AllowPublicBind: s.AllowPublicBind, CertFile: s.TLSCert, KeyFile: s.TLSKey,
 		Endpoints: append([]string(nil), s.Endpoints...), AllowOrigins: append([]string(nil), s.AllowOrigins...),
 		Life: life,
-	}, nil
+	}
+	if s.Tailnet != nil && s.Tailnet.OriginSource != originDefaultDisabled {
+		cfg.ExtraOrigins = liveWebOrigins()
+	}
+	return cfg, nil
 }
 
 // savedTailnetManualConfig is plain `amux direct serve` (no flags) with

@@ -28,7 +28,11 @@ func TestPaneFixtures(t *testing.T) {
 		t.Run(f.Name, func(t *testing.T) {
 			snap := f.Snapshot()
 			got := composer.Classify(f.Runtime, snap)
-			if got.State.String() != f.WantState || got.Busy != f.WantBusy || got.Text != f.WantText {
+			textOK := got.Text == f.WantText
+			if f.WantTyped != "" {
+				textOK = composer.MatchTyped(got.Text, f.WantTyped) == composer.EchoExact
+			}
+			if got.State.String() != f.WantState || got.Busy != f.WantBusy || !textOK {
 				var screen strings.Builder
 				for y := 0; y < snap.Rows; y++ {
 					screen.WriteString(snap.Text(y) + "\n")
@@ -60,6 +64,13 @@ func TestMatchTyped(t *testing.T) {
 		// left at the line end (docs/steering.md rule 9).
 		{"backslash continuations", "[amux] interject: PR 7 is red\\\nsecond line", composer.EchoExact},
 		{"backslash continuation, soft-wrapped", "[amux] interject: PR 7\n  is red\\\n  second line", composer.EchoExact},
+		// Claude Code took a fast typed burst for a paste and collapsed it.
+		{"collapsed to one token", "[Pasted text #1 +12 lines]", composer.EchoExact},
+		{"first words, then tokens", "[amux] interject:[Pasted text #1 +4 lines][Pasted text #2]", composer.EchoExact},
+		{"token, then the last words", "[Pasted text #3 +1 line] line", composer.EchoExact},
+		{"codex large paste", "[Pasted Content 1532 chars]", composer.EchoExact},
+		{"someone else's words before a token", "hey [Pasted text #1 +12 lines]", composer.EchoForeign},
+		{"someone else's words after a token", "[Pasted text #1 +12 lines] and mine", composer.EchoForeign},
 	} {
 		if got := composer.MatchTyped(tc.composer, typed); got != tc.want {
 			t.Errorf("%s: MatchTyped = %v, want %v", tc.name, got, tc.want)

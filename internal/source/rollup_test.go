@@ -37,7 +37,7 @@ func TestWorkgroupRollupMatrix(t *testing.T) {
 	}{
 		// Nobody works: the coordinator's own state.
 		{own: core.StateReady, members: []string{core.StateReady, core.StateIdle}, state: core.StateReady, status: "ready · 2 agents"},
-		{own: core.StateIdle, members: []string{core.StateIdle}, state: core.StateIdle, status: "idle · 1 agent"},
+		{own: core.StateStopped, members: []string{core.StateStopped}, state: core.StateStopped, status: "stopped · 1 agent"},
 		{own: core.StateReady, state: core.StateReady, status: "ready · 0 agents"},
 		// Someone runs, nobody blocked: running.
 		{own: core.StateRunning, members: []string{core.StateReady}, state: core.StateRunning, status: "running · 1 agent"},

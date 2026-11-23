@@ -134,10 +134,10 @@ func (t tierItems) label(prWord, generic string) string {
 // statuses its items carry.
 func Rollup(in Input) Result {
 	own := in.OwnState
-	if own == "" {
-		own = hp.StateIdle
+	if own == "" || own == hp.StateIdle {
+		own = hp.StateStopped // no runtime; "idle" is the legacy spelling
 	}
-	between := own == hp.StateReady || own == hp.StateIdle || own == hp.StateUnknown
+	between := own == hp.StateReady || own == hp.StateStopped || own == hp.StateUnknown
 	goalNeeds := between && goalNeedsUser(in.Goal)
 	maxState := own
 	var needs, busy, openItems []string
@@ -233,7 +233,7 @@ func Rollup(in Input) Result {
 	}
 
 	var reason []string
-	stopped := own == hp.StateIdle
+	stopped := own == hp.StateStopped
 	supervise := func() {
 		if !(between && inflight) {
 			return
@@ -285,8 +285,10 @@ func Rollup(in Input) Result {
 		reason = append(reason, list(mer.items))
 	default:
 		r.State, r.Lead = maxState, own
-		ro.State, ro.Label = hp.RollupIdle, "idle"
-		if maxState != hp.StateIdle {
+		// Nothing in flight. The label says "stopped" when no runtime is live, so a
+		// calm "idle" never hides a coordinator that cannot take an interject.
+		ro.State, ro.Label = hp.RollupIdle, "stopped"
+		if !hp.IsStopped(maxState) {
 			ro.State, ro.Label = hp.RollupReady, "ready"
 		}
 	}
