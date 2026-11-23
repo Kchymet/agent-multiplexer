@@ -8,7 +8,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -164,15 +163,13 @@ func managedServeConfig(s directsvc.Settings, set bool) (direct.ServeConfig, err
 }
 
 func cmdDirectEnable(args []string) error {
-	fs := flag.NewFlagSet("amux direct enable", flag.ContinueOnError)
+	fs := newCmdFlagSet("direct enable")
 	var f directSettingsFlags
 	f.register(fs)
 	var tf tailnetFlags
 	tf.register(fs)
 	noWait := fs.Bool("no-wait", false, "")
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
-		directUsage()
+	if err := parseCmdFlags(fs, "direct enable", args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -242,11 +239,9 @@ var directEnsureDaemon = func() error {
 }
 
 func cmdDirectDisable(args []string) error {
-	fs := flag.NewFlagSet("amux direct disable", flag.ContinueOnError)
+	fs := newCmdFlagSet("direct disable")
 	noWait := fs.Bool("no-wait", false, "")
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
-		directUsage()
+	if err := parseCmdFlags(fs, "direct disable", args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -561,11 +556,10 @@ func printDirectStatus(r directStatusReport) {
 }
 
 func cmdDirectLogs(args []string) error {
-	fs := flag.NewFlagSet("amux direct logs", flag.ContinueOnError)
+	fs := newCmdFlagSet("direct logs")
 	n := fs.Int("n", 50, "")
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
-		return errors.New("usage: amux direct logs [-n lines]")
+	if err := parseCmdFlags(fs, "direct logs", args); err != nil {
+		return err
 	}
 	lines, err := tailLines(directsvc.LogPath(), *n)
 	if errors.Is(err, os.ErrNotExist) {

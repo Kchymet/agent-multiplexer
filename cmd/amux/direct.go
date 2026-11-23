@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -31,13 +30,11 @@ func cmdDirect(args []string) error {
 		sub = args[0]
 	}
 	if sub == "" || isHelpFlag(sub) {
-		directUsage()
-		return nil
+		return showHelp("direct")
 	}
 	run, ok := directSubcommands[sub]
 	if !ok {
-		directUsage()
-		return fmt.Errorf("unknown direct command %q", sub)
+		return usagef("unknown direct command %q", sub)
 	}
 	// The direct server and its administration act with host authority. A
 	// restricted agent session must never start or administer it, whatever
@@ -60,90 +57,6 @@ var directSubcommands = map[string]func([]string) error{
 	"disable":        cmdDirectDisable,
 	"status":         cmdDirectStatus,
 	"logs":           cmdDirectLogs,
-}
-
-func directUsage() {
-	w := os.Stderr
-	fmt.Fprint(w, `amux direct — direct client access (web, Android) over your LAN or VPN
-
-The direct server is an opt-in HTTPS listener on a private address. Clients
-enroll with a one-time code you paste or scan (enroll --qr), then reach this
-host's sessions with destination-issued credentials. No cloud service is in
-the path.
-
-usage: amux direct <command>
-
-  enable [serve flags]        save the listener settings and turn it on; the
-                              daemon runs it from now on (starting the daemon
-                              if it is stopped). Off by default.
-  enable --tailnet            derive listen, endpoint and certificate from this
-                              machine's tailnet (tailscaled LocalAPI) and turn
-                              the managed listener on
-  disable                     turn the daemon-managed listener off (settings,
-                              enrolled clients and cloud policy are kept)
-  status [--json]             setting, managed listener, server, provider offer
-  logs [-n lines]             the managed listener's log
-  serve                       run the direct server in the foreground (manual)
-  enroll [flags]              mint a one-time enrollment: a bundle to paste, or
-                              with --qr a QR code to scan (see enroll flags;
-                              amux direct enroll --help)
-  clients list                list enrolled clients
-  clients revoke <client-id>  revoke a client now (closes its streams first)
-  audit [--client <id>] [--limit N] [--json]  answers, item triage and overseer
-                              steers made by direct clients (newest last)
-  reset-identity --yes        replace the server identity; revokes every client
-  cloud enable|disable|status  cloud-assisted enrollment policy (off by default)
-
-serve flags (also accepted by enable, which saves them; enable merges what
-you type over the saved settings, and --no-wait skips waiting for readiness):
-  --listen <ip:port>      address to bind (a private or loopback IP literal)
-  --endpoint <origin>     https origin clients dial, e.g. https://amux.home.example:8443 (repeatable)
-  --allow-origin <origin> exact browser origin allowed to call (repeatable)
-  --tls-cert <pem>        certificate chain (browser use needs a browser-trusted one)
-  --tls-key <pem>         private key
-  --allow-public-bind     permit a non-private listen address (deliberate exposure)
-  --access-ttl <dur>      access token lifetime (default and maximum 10m)
-  --idle-ttl <dur>        refresh idle lifetime (default and maximum 720h)
-  --absolute-ttl <dur>    grant absolute lifetime (default and maximum 2160h)
-
-tailnet mode (enable --tailnet; typed serve flags above override what it
-derives, and an empty value returns that setting to derivation):
-  --port <n>              port for the derived listen address and endpoint (default 8443)
-  --tailscale-socket <p>  tailscaled socket (default: the platform's)
-  --no-default-origin     do not allow the orchestrator's web origin by default
-  --tailnet=false         leave tailnet mode
-  The certificate is reused from amux's store or ~/.config/amux/tls when it
-  has over 30 days left, else obtained from tailscaled, and renewed in place
-  while serving. --tls-cert/--tls-key use your own instead.
-  Plain amux direct serve runs the saved tailnet configuration in the
-  foreground only while the managed listener is disabled.
-
-`+directEnrollHelp+`
-cloud enable flags (the resource ceiling defaults to all ordinary sessions,
-never the amux console):
-  --permissions <list>    ceiling: read plus any of steer, respond, approve,
-                          manage, create, accounts (see enroll); codes never exceed it
-  --all-sessions          ceiling: any ordinary session (the default), or
-  --workgroup <root-id>   ceiling: only these workgroups (repeatable)
-  --owner <user-id>       advanced: the Harness user id allowed to request codes
-  --provider <id>         advanced: this host's Harness provider id
-                          Both default to the owner and provider Harness
-                          reported at this host's latest amux provide
-                          registration (shown by amux doctor). A flag that
-                          disagrees with it is refused unless both are given.
-  --max-outstanding <n>   unredeemed cloud codes at once (default 3)
-  --max-per-hour <n>      cloud codes per hour (default 10)
-
-Disabling the managed listener is not revocation: clients stay enrolled and
-the cloud policy stays as it is, ready for the next enable. Use
-amux direct clients revoke and amux direct cloud disable for those.
-
-Enabling cloud enrollment trusts the pinned Harness owner, through Harness, to
-mint enrollment codes up to the ceiling. Codes are bound to the requesting
-client's PKCE verifier and last 5 minutes. Every enable, disable or re-pin
-invalidates outstanding cloud codes; grants already redeemed stay until revoked
-(amux direct clients revoke). Identity reset disables cloud enrollment.
-`)
 }
 
 func directRoot() (string, error) { return direct.DefaultRoot() }
@@ -170,7 +83,7 @@ func relayHostProof(ctx context.Context, prove direct.ProveFunc) error {
 }
 
 func cmdDirectServe(args []string) error {
-	fs := flag.NewFlagSet("amux direct serve", flag.ContinueOnError)
+	fs := newCmdFlagSet("direct serve")
 	var endpoints, origins multiFlag
 	listen := fs.String("listen", "", "")
 	cert := fs.String("tls-cert", os.Getenv("AMUX_TLS_CERT"), "")
@@ -182,9 +95,7 @@ func cmdDirectServe(args []string) error {
 	fs.Var(&endpoints, "endpoint", "")
 	fs.Var(&origins, "allow-origin", "")
 	managed := fs.Bool("managed", false, "")
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
-		directUsage()
+	if err := parseCmdFlags(fs, "direct serve", args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -398,7 +309,7 @@ func cmdDirectAudit(args []string) error {
 			}
 			req.Limit = n
 		default:
-			return fmt.Errorf("usage: amux direct audit [--client <id>] [--limit N] [--json]")
+			return usagef("unknown audit argument %q", args[i])
 		}
 	}
 	resp, err := adminRun(req)
@@ -477,7 +388,7 @@ func cmdDirectCloud(args []string) error {
 }
 
 func cmdDirectCloudEnable(args []string) error {
-	fs := flag.NewFlagSet("amux direct cloud enable", flag.ContinueOnError)
+	fs := newCmdFlagSet("direct cloud enable")
 	var groups multiFlag
 	owner := fs.String("owner", "", "")
 	prov := fs.String("provider", "", "")
@@ -486,9 +397,7 @@ func cmdDirectCloudEnable(args []string) error {
 	maxOut := fs.Int("max-outstanding", 0, "")
 	perHour := fs.Int("max-per-hour", 0, "")
 	fs.Var(&groups, "workgroup", "")
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
-		directUsage()
+	if err := parseCmdFlags(fs, "direct cloud enable", args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {

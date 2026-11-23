@@ -109,7 +109,7 @@ func (h claudeHarness) CurrentModel(s store.Session) (string, bool) {
 // default|acceptEdits|plan|… or "none" to omit.
 func (claudeHarness) Argv(model string, extra ...string) ([]string, error) {
 	var args []string
-	if pm := envOr("AMUX_PERMISSION_MODE", "auto"); pm != "" && pm != "none" {
+	if pm := claudecfg.LaunchPermissionMode(); pm != "" {
 		args = append(args, "--permission-mode", pm)
 	}
 	// A short alias stored by an older amux (or passed via -f model=opus) is
@@ -261,7 +261,8 @@ func copyTreeRooted(root *hostprep.Root, src, dstRel string) error {
 	})
 }
 
-// PrepareLaunch trusts the launch dir in the agent's own home and installs amux's
+// PrepareLaunch trusts the launch dir in the agent's own home, pre-answers the
+// first-run and auto-mode dialogs there (EnsureUnattendedRooted), and installs amux's
 // status/capture hooks into the launch dir (not the user-wide settings.json),
 // pointed at the stable installed binary — plus the goal-mode hooks for a
 // workgroup coordinator, which always runs in goal mode (HookGoals). Claude loads settings.local.json only
@@ -270,6 +271,9 @@ func copyTreeRooted(root *hostprep.Root, src, dstRel string) error {
 // worktree cleanup remains an explicit migration concern.
 func (h claudeHarness) PrepareLaunch(root *hostprep.Root, s store.Session, dir string) error {
 	if err := h.home(s).TrustDirRooted(root, dir); err != nil {
+		return err
+	}
+	if err := h.home(s).EnsureUnattendedRooted(root, claudecfg.LaunchPermissionMode()); err != nil {
 		return err
 	}
 	return claudecfg.InstallHooksInRooted(root, dir, h.home(s).Dir, core.SessionBinPath(s.ID), HookGoals(s))

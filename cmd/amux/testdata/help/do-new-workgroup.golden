@@ -1,0 +1,20 @@
+amux do new-workgroup — create a workgroup (and a first agent when repos are given)
+
+usage: amux do new-workgroup [-f key=value]...
+
+fields (-f key=value, repeatable):
+  name=<text>                workgroup display name
+  prompt=<text>              the coordinator's task (its goal on the default runtime); never copied to a member
+  repos=<a,b>                repos the workgroup is limited to (its grant ceiling); naming any also creates
+                             a first member agent on them (one repo = a single-repo workgroup)
+  agent=<harness>            first member's harness: claude | codex (default claude)
+  model=<model>              first member's model (default: its harness's default)
+  mode=<mode>                first member's mode: task | interactive (default task)
+  coordinator=<harness>      coordinator runtime: claude | codex (default codex, the native goal runtime;
+                             claude runs in goal mode through amux's goal hooks)
+  coordinator_model=<model>  coordinator model (default: its harness's default)
+  linear=<url>               Linear issue link, prepended to the prompt
+
+examples:
+  amux do new-workgroup -f name=infra -f repos=infra -f prompt="upgrade CI"
+  amux do new-workgroup -f name=triage -f coordinator=claude -f coordinator_model=opus
