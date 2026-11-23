@@ -292,6 +292,9 @@ func (r *sessionRuntime) dispatchItems(ctx context.Context, principal access.Pri
 // handleItemAction serves an item verb from the host control path, acting as
 // a.ID.
 func (d *Daemon) handleItemAction(ctx context.Context, a core.Action) core.Result {
+	// The host acting is the user: its acknowledgments authorize the
+	// overseer's create-from-item (itemsvc.HostAcknowledged).
+	ctx = itemsvc.WithHost(ctx)
 	req := access.Request{Route: access.RouteAction, Verb: a.Action, ID: a.ID, Target: a.Target, Fields: a.Fields}
 	if err := validateItemAction(req); err != nil {
 		return fail("%v", err)
@@ -412,63 +415,3 @@ func (d *Daemon) loadItemWake(recipient string) (shown, all []items.Item, err er
 
 // itemsTriageHint closes a wake-up that lists items.
 const itemsTriageHint = "Triage them with `amux agent items` (ack, dismiss, done; a coordinator may `amux agent escalate <id>` to the global inbox)."
-
-// deliverGlobalInboxWakes offers the global inbox owner (items.GlobalInbox,
-// today the console) its unnotified items. Like a coordinator wake-up it is
-// typed only into a live owner between turns with no prompt open; otherwise it
-// is deferred. The items stay in the global inbox either way.
-func (d *Daemon) deliverGlobalInboxWakes(ctx context.Context, wakes []prwatch.Wake) []prwatch.Delivery {
-	results := make([]prwatch.Delivery, len(wakes))
-	for i, w := range wakes {
-		results[i] = prwatch.Deferred
-		if w.Kind != prwatch.KindItems {
-			results[i] = prwatch.Dropped
-		}
-	}
-	owner := items.GlobalInbox()
-	release := d.admitSessions(owner)
-	defer release()
-	shown, all, err := d.loadItemWake(owner)
-	if err != nil {
-		log.Printf("items: global inbox wake-up: %v", err)
-		return results
-	}
-	if len(all) == 0 {
-		for i := range results {
-			results[i] = prwatch.Dropped
-		}
-		return results
-	}
-	sess, found, err := lookupSession(owner)
-	if err != nil || !found || sess.Archived {
-		log.Printf("items: global inbox owner %s unavailable: found=%v err=%v", owner, found, err)
-		return results
-	}
-	if ready, why := d.coordinatorTakesWake(sess); !ready {
-		if why != "" {
-			log.Printf("items: global inbox wake-up deferred: %s", why)
-		}
-		return results
-	}
-	text := prWakeText(false, itemWakeLines(shown, len(all)), wakeKinds{items: true})
-	outcome, err := d.beginPRWake(ctx, sess, text)
-	if err != nil || outcome != prwatch.Delivered {
-		if outcome == prwatch.Indeterminate {
-			for i := range results {
-				results[i] = prwatch.Indeterminate
-			}
-		}
-		log.Printf("items: global inbox wake-up not delivered: %v", err)
-		return results
-	}
-	if err := d.items.MarkNotified(owner, all); err != nil {
-		log.Printf("items: mark global inbox items notified: %v", err)
-	}
-	for i := range results {
-		if wakes[i].Kind == prwatch.KindItems {
-			results[i] = prwatch.Delivered
-		}
-	}
-	log.Printf("items: woke global inbox owner %s (%d item(s))", owner, len(all))
-	return results
-}

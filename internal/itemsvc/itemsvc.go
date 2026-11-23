@@ -309,7 +309,7 @@ func (s *Service) Transition(ctx context.Context, actorID, itemID, verb, note st
 			// Reopening is news for the recipient; any other move is the
 			// recipient (or source) having dealt with it.
 			it.Unnotified = state == items.StateOpen
-			it.AddEvent(items.Event{At: now, By: actor.ID, Action: items.EventFor(state), Note: note})
+			it.AddEvent(items.Event{At: now, By: actor.ID, Action: items.EventFor(state), Note: note, Host: IsHost(ctx)})
 			return nil
 		})
 		return err

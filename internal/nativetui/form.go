@@ -497,6 +497,9 @@ type formState struct {
 	cursor        int
 	insert        bool
 	pending       string
+	// extra are fixed fields sent with the form's own (e.g. the queue entry an
+	// answer is for).
+	extra map[string]string
 }
 
 func (fs *formState) values() map[string]string {
@@ -848,6 +851,9 @@ func (m *model) submitForm() tea.Cmd {
 
 func formFieldsForSubmit(fs *formState) map[string]string {
 	fields := fs.values()
+	for k, v := range fs.extra {
+		fields[k] = v
+	}
 	if fs.action == core.ActionNewWorkgroup && fields["repos"] == "" && !fs.explicitRepos {
 		// An untouched first-agent picker means "create an empty but immediately
 		// usable coordinator", not an explicitly empty authorization ceiling.

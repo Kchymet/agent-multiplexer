@@ -58,6 +58,11 @@ func validateSessionQuery(req access.Request) error {
 		return validateWaitQuery(req)
 	case core.QueryItems:
 		return validateItemQuery(req)
+	case core.QueryQueue:
+		if req.ID != "" || validateFields(req.Fields, core.QueueAllField) != nil {
+			return fmt.Errorf("query %q accepts only the %q field", req.Verb, core.QueueAllField)
+		}
+		return nil
 	case core.QueryRuntimeEvents:
 		if strings.TrimSpace(req.ID) == "" {
 			return fmt.Errorf("query %q requires an id", req.Verb)
@@ -107,6 +112,9 @@ func validateSessionAction(req access.Request) error {
 	switch req.Verb {
 	case core.ActionRaiseItem, core.ActionItemState, core.ActionEscalateItem:
 		return validateItemAction(req)
+	case core.ActionQueueAnswer, core.ActionQueueDismiss:
+		// Recognized so policy answers access denied: only the host answers.
+		return joinValidation(noID(), noTarget(), fields(core.QueueEntryField, core.QueueTextField, core.QueueChoiceField, core.SteerDecision))
 	case core.ActionRefresh:
 		return joinValidation(noID(), noTarget(), fields())
 	case core.ActionStart:
@@ -161,7 +169,7 @@ func validateSessionAction(req access.Request) error {
 		// coordinator/coordinator_model choose the workgroup's own session runtime
 		// (agent/model describe a member): the console's guide teaches them and the
 		// CLI sends them, so a restricted caller must be able to use them too.
-		return joinValidation(noID(), noTarget(), fields("name", "prompt", "mode", "model", "agent", "repos", "linear", wsops.FieldCoordinator, wsops.FieldCoordinatorModel), validateCreationMode(req.Fields))
+		return joinValidation(noID(), noTarget(), fields("name", "prompt", "mode", "model", "agent", "repos", "linear", wsops.FieldCoordinator, wsops.FieldCoordinatorModel, access.FromItemField), validateCreationMode(req.Fields))
 	case core.ActionCreateWorkspace:
 		if err := joinValidation(noID(), noTarget(), fields("name", "prompt", "mode", "model", "agent", "repos", "defaultAgent", wsops.FieldCoordinator, wsops.FieldCoordinatorModel), validateCreationMode(req.Fields)); err != nil {
 			return err

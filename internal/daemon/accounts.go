@@ -7,6 +7,7 @@ import (
 	"amux/internal/codexauth"
 	"amux/internal/console"
 	"amux/internal/core"
+	"amux/internal/overseer"
 	"amux/internal/store"
 	"context"
 	"crypto/rand"
@@ -193,8 +194,8 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		if err != nil {
 			return fail("account_store_unavailable")
 		}
-		// The built-in console is synthetic and absent from SQL inventory.
-		rows = append(rows, console.Session())
+		// The built-in console and overseer are synthetic and absent from SQL inventory.
+		rows = append(rows, console.Session(), overseer.Session())
 		all := make(map[string]string, len(rows))
 		for _, row := range rows {
 			all[row.ID] = agent.Canonical(row.Agent)

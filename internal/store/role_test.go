@@ -9,7 +9,7 @@ import (
 // The role vocabulary is restated in store (below core in the import graph);
 // the wire's constants are the source of truth, so the two must agree.
 func TestRoleConstantsMatchWire(t *testing.T) {
-	if RoleConsole != harnessproto.RoleConsole || RoleCoordinator != harnessproto.RoleCoordinator || RoleRepo != harnessproto.RoleRepo {
+	if RoleConsole != harnessproto.RoleConsole || RoleOverseer != harnessproto.RoleOverseer || RoleCoordinator != harnessproto.RoleCoordinator || RoleRepo != harnessproto.RoleRepo {
 		t.Fatalf("store roles (%q %q %q) drifted from harnessproto (%q %q %q)",
 			RoleConsole, RoleCoordinator, RoleRepo,
 			harnessproto.RoleConsole, harnessproto.RoleCoordinator, harnessproto.RoleRepo)

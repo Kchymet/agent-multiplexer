@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 // keyedLocks is one exclusive lock per key (a session id), created on first
@@ -244,7 +244,7 @@ func creationAction(a core.Action) bool {
 // workgroupStart reports a host `start` of a workgroup root, which starts
 // every member under the members' own locks.
 func workgroupStart(a core.Action) bool {
-	if a.Action != core.ActionStart || a.ID == "" || a.ID == console.ID {
+	if a.Action != core.ActionStart || a.ID == "" || wsops.IsSyntheticID(a.ID) {
 		return false
 	}
 	db, err := store.OpenReadOnly()
@@ -274,7 +274,7 @@ func archiveScopedAction(a core.Action) (ids []string, creation bool, ok bool) {
 	default:
 		return nil, false, false
 	}
-	if a.ID == "" || a.ID == console.ID {
+	if a.ID == "" || wsops.IsSyntheticID(a.ID) {
 		return nil, false, false
 	}
 	ids, found := sessionAndMembers(a.ID)
@@ -340,7 +340,7 @@ func repoScopedAction(a core.Action) ([]string, bool) {
 	case core.ActionAddRepo:
 		return nil, true
 	case core.ActionAgentSetRepos:
-		if a.ID == "" || a.ID == console.ID {
+		if a.ID == "" || wsops.IsSyntheticID(a.ID) {
 			return nil, false
 		}
 		db, err := store.OpenReadOnly()
@@ -382,7 +382,7 @@ func sessionScopedAction(a core.Action) (string, bool) {
 	default:
 		return "", false
 	}
-	if a.ID == "" || a.ID == console.ID {
+	if a.ID == "" || wsops.IsSyntheticID(a.ID) {
 		return "", false
 	}
 	db, err := store.OpenReadOnly()

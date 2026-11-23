@@ -323,7 +323,7 @@ func ValidateResource(r ResourceScope) (ResourceScope, error) {
 			if !validSessionID(id) {
 				return r, fmt.Errorf("invalid workgroup id %q", id)
 			}
-			if id == ConsoleID {
+			if id == ConsoleID || id == OverseerID {
 				return r, errors.New("the console cannot be granted over direct access")
 			}
 		}

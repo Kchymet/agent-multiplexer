@@ -497,6 +497,11 @@ func (c *Client) Query(name string) (json.RawMessage, error) {
 	return c.queryAction(core.Action{Action: core.ActionQuery, Query: name})
 }
 
+// QueryFields is Query with request fields (e.g. QueryQueue's "all").
+func (c *Client) QueryFields(name string, fields map[string]string) (json.RawMessage, error) {
+	return c.queryAction(core.Action{Action: core.ActionQuery, Query: name, Fields: fields})
+}
+
 // queryAction is the general form of Query: it carries a full ActionQuery (so a
 // read model can take an id, e.g. QueryRuntimePath) and returns the raw rows.
 func (c *Client) queryAction(a core.Action) (json.RawMessage, error) {

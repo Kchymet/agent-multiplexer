@@ -13,6 +13,7 @@ import (
 	"amux/internal/agent"
 	"amux/internal/console"
 	"amux/internal/core"
+	"amux/internal/overseer"
 	"amux/internal/panespec"
 	"amux/internal/store"
 	"amux/internal/wsops"
@@ -45,10 +46,17 @@ func (d *Daemon) sessionAccessForLaunch(ctx context.Context, id string) (store.S
 			return store.Session{}, access.SessionAccess{}, fmt.Errorf("ensure console launch directory: %w", err)
 		}
 	}
+	if session.Role() == store.RoleOverseer {
+		if err := overseer.Ensure(); err != nil {
+			return store.Session{}, access.SessionAccess{}, fmt.Errorf("ensure overseer launch directory: %w", err)
+		}
+	}
 	expected := session.Dir
 	switch session.Role() {
 	case store.RoleConsole:
 		expected = console.Dir()
+	case store.RoleOverseer:
+		expected = overseer.Dir()
 	case store.RoleCoordinator:
 		expected = store.CoordinatorDir(session.ID)
 	case store.RoleRepo:

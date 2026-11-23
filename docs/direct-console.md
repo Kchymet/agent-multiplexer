@@ -1,6 +1,9 @@
 # Admin console, overseer, and direct access (design)
 
-Status: proposal for sign-off, revision 2. Nothing here is implemented yet.
+Status: revision 2. **Phase A (§6: the overseer role, the question queue, local
+CLI/TUI) is implemented** — see [default-sessions.md](default-sessions.md),
+[workgroup-permissions.md](workgroup-permissions.md#console-overseer-and-repo-homes)
+and `amux queue`. Phase B (direct exposure, §5) awaits sign-off; Phase C is optional.
 
 Revision 2 splits today's console into two sessions:
 

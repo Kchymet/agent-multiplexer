@@ -89,6 +89,11 @@ const (
 	// coordinator, or the console — so a burst coalesces to one wake per
 	// recipient; Deliver reads the items themselves at delivery time.
 	KindItems = "items"
+	// KindOverseer is a coordinator update addressed to the overseer (the
+	// global inbox owner): a coordinator asked the user, reported itself
+	// blocked, or completed its goal. Workgroup and SessionID name the
+	// overseer; Text is the line it reads.
+	KindOverseer = "overseer"
 )
 
 // Member is one active workgroup member whose PRs are watched.
@@ -137,7 +142,7 @@ type Wake struct {
 	Branch    string // the member branch that owned the PR
 	PRBranch  string // the observed PR head (Branch or a permitted suffix)
 	Text      string
-	// Kind is KindPR, KindMember or KindItems. A member wake carries the member State it
+	// Kind is KindPR, KindMember, KindItems or KindOverseer. A member wake carries the member State it
 	// reports instead of Repo/Branch/PRBranch, and Deliver drops it when the
 	// member has moved on by delivery time.
 	Kind  string

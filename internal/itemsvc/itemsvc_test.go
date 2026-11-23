@@ -31,13 +31,14 @@ func newService(t *testing.T) (*Service, fakeResolver) {
 	}
 	db.Close()
 	res := fakeResolver{
-		"console": {ID: "console", Role: "console"},
-		"wg1":     {ID: "wg1", Role: "coordinator"},
-		"wg2":     {ID: "wg2", Role: "coordinator"},
-		"a1":      {ID: "a1", RootID: "wg1"},
-		"a2":      {ID: "a2", RootID: "wg1"},
-		"b1":      {ID: "b1", RootID: "wg2"},
-		"old":     {ID: "old", RootID: "wg1", Archived: true},
+		"console":  {ID: "console", Role: "console"},
+		"overseer": {ID: "overseer", Role: "overseer"},
+		"wg1":      {ID: "wg1", Role: "coordinator"},
+		"wg2":      {ID: "wg2", Role: "coordinator"},
+		"a1":       {ID: "a1", RootID: "wg1"},
+		"a2":       {ID: "a2", RootID: "wg1"},
+		"b1":       {ID: "b1", RootID: "wg2"},
+		"old":      {ID: "old", RootID: "wg1", Archived: true},
 	}
 	now := int64(0)
 	return &Service{Open: OpenStore, OpenRead: OpenReadStore, Resolver: res, Now: func() int64 { now++; return now }}, res
@@ -112,8 +113,16 @@ func TestListIsScopedPerActor(t *testing.T) {
 	if n := count("console", Query{}); n != 4 {
 		t.Fatalf("console sees %d, want all 4", n)
 	}
-	if n := count("console", Query{Box: BoxInbox}); n != 1 {
-		t.Fatalf("console inbox = %d, want wg1's 1", n)
+	// The global inbox is the overseer's; the admin console keeps an
+	// all-items operator view but receives nothing.
+	if n := count("overseer", Query{Box: BoxInbox}); n != 1 {
+		t.Fatalf("overseer inbox = %d, want wg1's 1", n)
+	}
+	if n := count("overseer", Query{}); n != 4 {
+		t.Fatalf("overseer sees %d, want all 4", n)
+	}
+	if n := count("console", Query{Box: BoxInbox}); n != 0 {
+		t.Fatalf("console inbox = %d, want 0", n)
 	}
 	if _, err := svc.Get(ctx, "a2", fromA1.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("sibling Get = %v, want ErrNotFound", err)

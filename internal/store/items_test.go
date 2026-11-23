@@ -91,7 +91,7 @@ func TestItemsFilters(t *testing.T) {
 		t.Fatalf("involving m1 = %v", got)
 	}
 	if got := ids(ItemFilter{Recipient: items.GlobalInbox()}); len(got) != 1 || got[0] != b.ID {
-		t.Fatalf("console inbox = %v", got)
+		t.Fatalf("global inbox = %v", got)
 	}
 	if got, truncated, _ := db.Items(ItemFilter{Limit: 2}); len(got) != 2 || !truncated {
 		t.Fatalf("limit 2 = %d items truncated=%v", len(got), truncated)
@@ -101,7 +101,7 @@ func TestItemsFilters(t *testing.T) {
 	}
 }
 
-func TestArchiveCarriesActiveItemsToConsole(t *testing.T) {
+func TestArchiveCarriesActiveItemsToGlobalInbox(t *testing.T) {
 	db := openTemp(t)
 	if err := db.PutSession(Session{ID: "wg", Agent: "claude"}); err != nil {
 		t.Fatal(err)
@@ -138,7 +138,7 @@ func TestArchiveCarriesActiveItemsToConsole(t *testing.T) {
 	}
 }
 
-func TestDeleteCarriesActiveItemsToConsole(t *testing.T) {
+func TestDeleteCarriesActiveItemsToGlobalInbox(t *testing.T) {
 	db := openTemp(t)
 	if err := db.PutSession(Session{ID: "wg", Agent: "claude"}); err != nil {
 		t.Fatal(err)
