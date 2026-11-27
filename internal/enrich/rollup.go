@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -154,6 +155,7 @@ func Rollup(in Input) Result {
 	totals := zeroStates()
 	other := map[string]map[string]int{}
 	var prItems []hp.Enrichment
+	var openPRs []hp.RollupPullRequest
 	tiers := map[string]*tierItems{tierAttention: {}, tierReview: {}, tierMerge: {}}
 	staleItem := false
 	for _, m := range in.Members {
@@ -180,6 +182,9 @@ func Rollup(in Input) Result {
 			totals[state]++
 			if e.Kind == hp.EnrichmentPullRequest {
 				prItems = append(prItems, e)
+				if ref, ok := openPullRequest(m, e); ok {
+					openPRs = append(openPRs, ref)
+				}
 			} else {
 				if other[e.Kind] == nil {
 					other[e.Kind] = zeroStates()
@@ -206,6 +211,10 @@ func Rollup(in Input) Result {
 		if kinds[hp.EnrichmentPullRequest] {
 			c := pullRequestCounts(prItems)
 			ro.Enrichments.PullRequest = &c
+			sort.SliceStable(openPRs, func(i, j int) bool {
+				return stateRank(openPRs[i].Status) < stateRank(openPRs[j].Status)
+			})
+			ro.PullRequests = openPRs
 		}
 		if len(other) > 0 {
 			ro.Enrichments.Other = other
@@ -333,6 +342,34 @@ func itemText(member string, e hp.Enrichment) string {
 		detail = strings.ReplaceAll(e.Status.State, "_", " ")
 	}
 	return fmt.Sprintf("%s %s %s", member, ref, detail)
+}
+
+// openPullRequest is a member's PR as a Rollup.PullRequests entry, when it
+// is still open (draft or open).
+func openPullRequest(m Member, e hp.Enrichment) (hp.RollupPullRequest, bool) {
+	pr := e.PullRequest
+	if pr == nil || pr.State == hp.PRStateMerged || pr.State == hp.PRStateClosed {
+		return hp.RollupPullRequest{}, false
+	}
+	url := pr.URL
+	if url == "" {
+		url = e.URL
+	}
+	return hp.RollupPullRequest{
+		SessionID: m.ID, Member: m.Label, ID: e.ID, Repo: pr.Repo, Number: pr.Number,
+		Title: pr.Title, URL: url, State: pr.State, Status: normalizeStatus(e.Status.State),
+		CI: pr.CI.Status, Label: e.Label,
+	}, true
+}
+
+// stateRank orders normalized states most demanding first (EnrichmentStates).
+func stateRank(state string) int {
+	for i, s := range hp.EnrichmentStates {
+		if s == state {
+			return i
+		}
+	}
+	return len(hp.EnrichmentStates)
 }
 
 // pullRequestCounts is the pull_request kind's v1 counts.

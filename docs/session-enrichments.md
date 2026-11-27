@@ -98,7 +98,37 @@ unknown reads as `ready`), `count`, `label`, `reason`, `enrichments`
 state under its own key), `totals` (all kinds, by normalized state, every state
 present), `sources` (`[{kind, stale, stale_reason, observed_at, interval_s}]`),
 `stale`, `stale_reason` (`gh_unavailable|rate_limited|error`, or a source's own
-setup reason), `observed_at`.
+setup reason), `observed_at`, `pull_requests` (below).
+
+**`rollup.pull_requests`** (spec v1.2, additive): the members' open pull
+requests (drafts included; merged and closed left out), the most demanding
+first (in `status` order: attention, failed, awaiting_review, awaiting_merge,
+pending, …), so a workgroup row can link each PR directly without walking its
+members. Absent when nothing is open, PR watching is off, or the daemon
+predates it; treat absent as `[]`. Each entry:
+
+| key | |
+|---|---|
+| `session_id` | the member session that owns the PR (its row carries the full `enrichments` entry) |
+| `member` | the member's compact label |
+| `id` | the enrichment id, `owner/repo#n` |
+| `repo`, `number` | `owner/repo` and the PR number |
+| `title` | the PR title |
+| `url` | the PR on GitHub (`https://…`; may be empty) |
+| `state` | `draft\|open` |
+| `status` | the normalized `status.state` (colors the chip) |
+| `ci` | `pending\|green\|red\|none` |
+| `label` | ready-made chip text, e.g. `#245 ✗ CI` |
+
+```json
+"pull_requests": [{"session_id": "m2", "member": "b", "id": "o/r#245", "repo": "o/r",
+  "number": 245, "title": "Fix lint", "url": "https://github.com/o/r/pull/245",
+  "state": "open", "status": "attention", "ci": "red", "label": "#245 ✗ CI"}]
+```
+
+A member row's own open PRs are its `enrichments` entries of kind
+`pull_request` whose `status.state` is not `done`; `url` (or
+`pull_request.url`) links each one.
 
 The rollup (`enrich.Rollup`) is a pure function of member states and entries'
 normalized statuses — never a kind's payload. Precedence: waiting on the user >
@@ -129,4 +159,6 @@ attribution rule.
 Member rows and workgroup headers show chips — the kind's icon (`⑂` PR, `⇪`
 deploy, `•` unknown) and the label, colored by `status.state`; `p` opens the
 selected row's list in the main pane (Enter/o opens an entry in the browser);
-`o` on the rail opens the row's most demanding one.
+`o` on the rail opens the row's open PR directly, or, when several are open
+(a workgroup header, a member with more than one), shows that list with the
+most demanding one selected.

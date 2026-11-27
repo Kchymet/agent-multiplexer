@@ -251,20 +251,31 @@ func (m *model) togglePRs() {
 	m.prPanel = prPanelState{open: true}
 }
 
-// openSelectedPR opens the selected row's most relevant PR in the browser.
+// openSelectedPR opens the selected row's PR in the browser: its only open
+// one straight away, or, when several are open (a workgroup header, a member
+// with more than one), the pick-list with the most demanding one selected.
 func (m *model) openSelectedPR() {
 	entries := m.prEntries(m.selected())
 	if len(entries) == 0 {
 		m.status = "no pull request to open"
 		return
 	}
-	best := entries[0]
-	for _, me := range entries[1:] {
-		if isOpen(me.e) && (!isOpen(best.e) || statusRank(me.e.Status.State) < statusRank(best.e.Status.State)) {
-			best = me
+	best, nOpen := 0, 0
+	for i, me := range entries {
+		if !isOpen(me.e) {
+			continue
+		}
+		nOpen++
+		if !isOpen(entries[best].e) || statusRank(me.e.Status.State) < statusRank(entries[best].e.Status.State) {
+			best = i
 		}
 	}
-	m.openPR(best.e)
+	if nOpen > 1 {
+		m.prPanel = prPanelState{open: true, cursor: best}
+		m.status = fmt.Sprintf("%d open pull requests: Enter opens one", nOpen)
+		return
+	}
+	m.openPR(entries[best].e)
 }
 
 func (m *model) openPR(e hp.Enrichment) {
