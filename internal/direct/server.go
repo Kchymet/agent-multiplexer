@@ -120,6 +120,7 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET "+PathQueue, s.queueRoute)
 	mux.HandleFunc("GET "+PathQueueWatch, s.queueWatch)
 	mux.HandleFunc("POST "+PathQueue+"/{id}/answer", s.answerRoute)
+	mux.HandleFunc("POST "+PathQueue+"/{id}/release", s.releaseRoute)
 	mux.HandleFunc("GET "+PathSummary, s.summaryRoute)
 	mux.HandleFunc("POST "+PathItems+"/{id}/state", s.itemStateRoute)
 	s.registerWakeRoutes(mux)
@@ -1169,7 +1170,7 @@ func (s *Server) idemReply(w http.ResponseWriter, l *Lease, out idemOutcome, rec
 			status := http.StatusUnprocessableEntity
 			if rec.Code == CodeUnavailable || rec.Code == CodeDaemonUpgradeRequired {
 				status = http.StatusServiceUnavailable
-			} else if rec.Code == CodeAskerGone || rec.Code == CodeAnswered {
+			} else if queueConflict(rec.Code) != "" {
 				status = http.StatusConflict
 			}
 			writeErr(w, status, rec.Code, rec.Error)

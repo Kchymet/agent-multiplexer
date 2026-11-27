@@ -43,6 +43,10 @@ func cmdAgent(args []string) error {
 	case "permission":
 		// Claude-hook binding for nonauthoritative permission diagnostics.
 		return cmdAgentPermission(args[1:])
+	case "question":
+		// Claude-hook binding for the question hold: AskUserQuestion waits
+		// for an answer from any amux surface (fails open to the dialog).
+		return cmdAgentQuestion(args[1:])
 	case "model":
 		// Claude status-line binding: record the current model, then faithfully
 		// forward the same payload to any status-line command amux wrapped.

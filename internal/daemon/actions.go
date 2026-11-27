@@ -54,6 +54,12 @@ func (d *Daemon) handleAction(ctx context.Context, a core.Action) core.Result {
 		// Items touch only the item store, under the acting session's lock.
 		return d.handleItemAction(ctx, a)
 	}
+	if a.Action == core.ActionSteer && a.Fields[core.SteerVerb] == core.SteerAnswer && !effectAdmissionHeld(ctx) {
+		// A relayed VerbAnswer is a queue answer bound to the steered session
+		// (access already confined it to the host: allowSteer admits no
+		// restricted principal for it).
+		return d.handleQueueAction(ctx, steerAnswerAction(a))
+	}
 	if isQueueVerb(a.Action) && !effectAdmissionHeld(ctx) {
 		// A queue answer re-derives its entry, then runs an existing guarded
 		// verb (a steer, an item state change) under that verb's own locks.

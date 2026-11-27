@@ -57,7 +57,7 @@ func TestPollDefaultSessions(t *testing.T) {
 	for _, r := range rows {
 		byID[r.ID] = r
 	}
-	claudeCaps := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: false}
+	claudeCaps := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: false, Question: true} // the question hold
 	check := func(id, role, runtime, cwd string) core.Session {
 		t.Helper()
 		want := claudeCaps

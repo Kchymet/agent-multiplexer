@@ -588,6 +588,17 @@ func TestObservationHooksNeverBlockClaude(t *testing.T) {
 					}
 					continue
 				}
+				if strings.Contains(cmd, questionHoldCommand) {
+					// The question hold blocks by design (its stdout answers the
+					// call), bounded by its own timeout.
+					if _, ok := h["async"]; ok || event != "PreToolUse" {
+						t.Errorf("%s question hold %q must block on PreToolUse", event, cmd)
+					}
+					if timeout, _ := h["timeout"].(float64); timeout != QuestionHoldHookTimeout {
+						t.Errorf("question hold timeout = %v", h["timeout"])
+					}
+					continue
+				}
 				if h["async"] != true {
 					t.Errorf("%s hook %q is not async", event, cmd)
 				}

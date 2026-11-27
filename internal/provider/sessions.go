@@ -255,6 +255,13 @@ func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 	}
 	if err != nil {
 		res.Error = err.Error()
+		// The daemon's stable failure class (a question answer's asker_gone,
+		// answered, needs_newer_client, ...) rides the result so the relay
+		// does not have to parse Error.
+		var coded interface{ ResultCode() string }
+		if errors.As(err, &coded) {
+			res.Code = coded.ResultCode()
+		}
 	} else {
 		res.OK, res.NewID = true, newID
 		// A steering verb is taken on, not completed: say "accepted" so the
@@ -519,7 +526,7 @@ func sessionActionFor(m harnessproto.MuxMsg) (core.Action, bool) {
 	case harnessproto.VerbStart:
 		return core.Action{Action: core.ActionStart, ID: m.ID}, true
 	case harnessproto.VerbPrompt, harnessproto.VerbInterject,
-		harnessproto.VerbStop, harnessproto.VerbPermission, harnessproto.VerbGoal:
+		harnessproto.VerbStop, harnessproto.VerbPermission, harnessproto.VerbGoal, harnessproto.VerbAnswer:
 		return core.Action{Action: core.ActionSteer, ID: m.ID, Fields: steerFields(m)}, true
 	default:
 		return core.Action{}, false
@@ -549,6 +556,7 @@ func steerFields(m harnessproto.MuxMsg) map[string]string {
 		// relayed permission answer fail that check.
 		harnessproto.FieldRuntimeGeneration,
 		harnessproto.FieldGoalStatus, harnessproto.FieldGoalObjective, harnessproto.FieldGoalBudget,
+		harnessproto.FieldAnswer,
 	} {
 		if v, ok := m.Fields[k]; ok {
 			f[k] = v

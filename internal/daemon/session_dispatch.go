@@ -91,6 +91,10 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		if req.Route == access.RouteQuery && req.Verb == core.QueryRuntimeEvents {
 			return r.dispatchRuntimeEvents(ctx, request.Principal, req, action)
 		}
+		if req.Route == access.RouteQuery && req.Verb == core.QueryQuestionHold {
+			// Blocks by design, like a wait.
+			return r.dispatchQuestionHold(ctx, request.Principal, req, action)
+		}
 		if req.Route == access.RouteQuery && req.Verb == core.QueryWait {
 			// Blocks by design: never under the admission locks below.
 			return r.dispatchWait(ctx, request.Principal, req, action)

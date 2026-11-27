@@ -19,6 +19,8 @@ itself, or for a coordinator to its workgroup and current direct members.`,
 		Sub: []*cmdSpec{
 			{Name: "status", Args: "<state>", Summary: "strictly report activity: idle | ready | waiting | running"},
 			{Name: "hook", Args: "<state>", Summary: "nondisruptive Claude-hook activity binding"},
+			{Name: "question", Args: "hold", Summary: "Claude-hook binding: hold an AskUserQuestion for an answer from any amux surface",
+				Detail: "Generated PreToolUse hook. It prints the answer as the hook's decision, or nothing (Claude draws its own dialog); it never fails the call."},
 			{Name: "permission", Args: "<request|allow|deny|clear> [--hook]", Summary: "report a diagnostic permission observation",
 				Detail: "These reports never create answerable approval rights.",
 				Flags: []flagSpec{
@@ -148,19 +150,39 @@ done).`,
 					{Name: "all", Short: "a", Usage: "also list entries you dismissed"},
 					{Name: "json", Short: "j", Usage: "print as JSON"},
 				}},
-			{Name: "answer", Aliases: []string{"reply"}, Args: "<entry> [<text>...] [--choice <label>]... [--allow | --deny]",
+			{Name: "questions", Args: "[--all] [--json]", Summary: "agents' open questions in full: every question, option and what each takes",
+				Flags: []flagSpec{
+					{Name: "all", Short: "a", Usage: "also list questions you dismissed"},
+					{Name: "json", Short: "j", Usage: "print as JSON (each entry's form included)"},
+				}},
+			{Name: "show", Args: "<entry> [--json]", Summary: "one question in full, option previews included"},
+			{Name: "answer", Aliases: []string{"reply"}, Args: "<entry> [<text>...] [--choice <label>]... [--allow | --deny] | [--q <n>] --select <label|n>... [--other <text>] [--note <text>]",
 				Summary: "answer one entry; amux re-checks it is still open and delivers it",
 				Detail: `A question takes --choice <label> (repeat per question, "a|b" for a
 multi-select) or free text; a permission request takes --allow or --deny; a
-goal ask or decision item takes text.`,
+goal ask or decision item takes text.
+
+An agent's structured question (Claude AskUserQuestion, Codex request-user-input)
+also takes the form flags, with every feature of its own dialog: --q starts each
+question's group (optional for one question), --select takes an exact option
+label or a 1-based number and repeats for a multi-select, --other gives free
+text (- reads stdin), --note attaches a note where the question takes one.
+Exit codes: 3 already answered, 4 no longer open, 5 not deliverable (answer in
+the pane), 6 needs a newer client.`,
 				Flags: []flagSpec{
 					{Name: "choice", Short: "c", Arg: "<label>", Repeat: true, Usage: "the option label to pick"},
 					{Name: "text", Short: "m", Arg: "<text>", Usage: "free-text answer (or give the words as operands)"},
 					{Name: "allow", Usage: "allow a permission request"},
 					{Name: "deny", Usage: "deny a permission request"},
+					{Name: "q", Arg: "<n|id|header>", Repeat: true, Usage: "start a question's answers (form questions)"},
+					{Name: "select", Short: "s", Arg: "<label|n>", Repeat: true, Usage: "pick an option of the current question"},
+					{Name: "other", Short: "o", Arg: "<text|->", Usage: "free text for the current question (- reads stdin)"},
+					{Name: "note", Short: "n", Arg: "<text>", Usage: "a note on the current question, where it takes one"},
 				},
 				Examples: []string{"amux inbox answer q-12 --choice Yes", "amux inbox answer q-13 --allow"}},
 			{Name: "dismiss", Args: "<entry>", Summary: "hide an entry (a live question is hidden until it changes)"},
+			{Name: "cancel", Args: "<entry> [--message <text>]", Summary: "dismiss an agent's question to the agent, optionally with a reply"},
+			{Name: "release", Args: "<entry>", Summary: "hand a held Claude question back to the agent's pane, to answer it there"},
 			{Name: "ack", Args: "<item>", Summary: "acknowledge a global-inbox item as the user (lets the overseer act on it)"},
 		},
 	}
@@ -314,9 +336,12 @@ func doActionSpecs() map[string]*cmdSpec {
 				{Name: core.QueueEntryField, Arg: "<id>", Required: true, Usage: "the queue entry"},
 				{Name: core.QueueTextField, Arg: "<text>", Usage: "free-text answer"},
 				{Name: core.QueueChoiceField, Arg: "<label>", Usage: "option label(s), one line per question"},
-				{Name: core.SteerDecision, Arg: "allow|deny", Usage: "a permission request's answer"},
+				{Name: core.SteerDecision, Arg: "allow|deny|allow_session", Usage: "a permission request's answer"},
+				{Name: core.QueueFormField, Arg: "<json>", Usage: "a question form answer (harnessproto.FormAnswer)"},
 			}},
 		core.ActionQueueDismiss: {Summary: "hide a question-queue entry (host only; amux inbox dismiss)",
+			Fields: []fieldSpec{{Name: core.QueueEntryField, Arg: "<id>", Required: true, Usage: "the queue entry"}}},
+		core.ActionQueueRelease: {Summary: "hand a held Claude question back to its pane dialog (host only; amux inbox release)",
 			Fields: []fieldSpec{{Name: core.QueueEntryField, Arg: "<id>", Required: true, Usage: "the queue entry"}}},
 	}
 }
@@ -334,6 +359,9 @@ func configSpec() *cmdSpec {
                                         waiting goal (default on; read at daemon start)
   update.auto on|off                    automatic amux self-update (default on;
                                         AMUX_NO_AUTO_UPDATE=1 also disables)
+  questions.claude_hold on|off          hold Claude's AskUserQuestion so any amux surface
+                                        can answer it (default on; released to the pane on
+                                        input; off = answer in the pane)
   harnesses.update off|notify|auto      daemon update check for managed harnesses
   harnesses.check_interval <dur>        how often that check runs (24h; minimum 1h)
   harnesses.<claude|codex>.channel <c>  release channel to follow (claude: stable|latest)

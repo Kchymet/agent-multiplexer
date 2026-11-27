@@ -120,6 +120,8 @@ func TestOverseerAccessMatrix(t *testing.T) {
 		{"prompt repo home", Request{Route: RouteAction, Verb: core.ActionSteer, ID: "api", Fields: steer(core.SteerPrompt)}, false},
 		{"prompt console", Request{Route: RouteAction, Verb: core.ActionSteer, ID: "console", Fields: steer(core.SteerPrompt)}, false},
 		{"prompt itself", Request{Route: RouteAction, Verb: core.ActionSteer, ID: "overseer", Fields: steer(core.SteerPrompt)}, false},
+		// Question answers are the user's: the overseer never answers one.
+		{"answer coordinator", Request{Route: RouteAction, Verb: core.ActionSteer, ID: "wg1", Fields: map[string]string{core.SteerVerb: core.SteerAnswer, core.SteerRequestID: "q-aaaaaaaaaa", core.SteerAnswerField: `{"version":2,"action":"cancel"}`}}, false},
 
 		// Start: a workgroup (its members), never one member or the console.
 		{"start coordinator", Request{Route: RouteAction, Verb: core.ActionStart, ID: "wg1"}, true},

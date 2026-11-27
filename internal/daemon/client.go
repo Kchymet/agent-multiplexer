@@ -455,6 +455,12 @@ type RejectedError struct {
 
 func (e *RejectedError) Error() string { return e.Msg }
 
+// ResultCode is the daemon's failure class (Code); the provider relays it on
+// a session-result without importing this package.
+func (e *RejectedError) ResultCode() string { return e.Code }
+
+var _ interface{ ResultCode() string } = (*RejectedError)(nil)
+
 // PaneOpen asks the daemon to attach this connection to a tab of an agent,
 // streaming its output back as pane frames. The caller mints paneID (unique
 // within the connection).

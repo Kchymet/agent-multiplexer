@@ -10,6 +10,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/agent"
 	"amux/internal/core"
+	"amux/internal/queue"
 	amuxstore "amux/internal/store"
 	"amux/internal/wsops"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
@@ -394,6 +395,8 @@ func rowCaps(g Grant, row core.Session, byID map[string]core.Session) SessionCap
 		Interject: can(VerbInterject), Goal: can(VerbGoal), Permission: can(VerbPermission),
 		Start: can(VerbStart), Rename: can(VerbRename), Archive: can(VerbArchive), Unarchive: can(VerbUnarchive),
 		AddAgent: can(VerbAddAgent),
+		Question: row.Caps != nil && row.Caps.Question && g.Can(answerPerm(queue.KindQuestion)) &&
+			(!isOverseer(row) || mayDriveOverseer(g)),
 	}
 }
 

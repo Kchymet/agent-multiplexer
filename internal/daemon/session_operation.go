@@ -56,6 +56,11 @@ func validateSessionQuery(req access.Request) error {
 		return err
 	case core.QueryWait:
 		return validateWaitQuery(req)
+	case core.QueryQuestionHold:
+		if strings.TrimSpace(req.ID) == "" {
+			return fmt.Errorf("query %q requires an id", req.Verb)
+		}
+		return validateFields(req.Fields, core.HoldToolUseField, core.HoldInputField, core.HoldTimeoutField)
 	case core.QueryItems:
 		return validateItemQuery(req)
 	case core.QueryQueue:
@@ -112,7 +117,7 @@ func validateSessionAction(req access.Request) error {
 	switch req.Verb {
 	case core.ActionRaiseItem, core.ActionItemState, core.ActionEscalateItem:
 		return validateItemAction(req)
-	case core.ActionQueueAnswer, core.ActionQueueDismiss:
+	case core.ActionQueueAnswer, core.ActionQueueDismiss, core.ActionQueueRelease:
 		// Recognized so policy answers access denied: only the host answers.
 		return joinValidation(noID(), noTarget(), fields(core.QueueEntryField, core.QueueTextField, core.QueueChoiceField, core.SteerDecision))
 	case core.ActionRefresh:
@@ -216,8 +221,8 @@ func validateSessionSteer(fields map[string]string) error {
 			return err
 		}
 		decision := fields[core.SteerDecision]
-		if decision != core.SteerAllow && decision != core.SteerDeny {
-			return fmt.Errorf("field %q must be %q or %q", core.SteerDecision, core.SteerAllow, core.SteerDeny)
+		if decision != core.SteerAllow && decision != core.SteerDeny && decision != core.SteerAllowSession {
+			return fmt.Errorf("field %q must be %q, %q or %q", core.SteerDecision, core.SteerAllow, core.SteerDeny, core.SteerAllowSession)
 		}
 		return nil
 	default:

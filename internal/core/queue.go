@@ -16,7 +16,9 @@ const (
 	// entry against fresh state. Host only. Fields: QueueEntryField, and per
 	// kind: QueueTextField (question, goal_input, decision_needed) or
 	// QueueChoiceField (question: option labels, newline-separated), or
-	// SteerDecision allow|deny (permission).
+	// SteerDecision allow|deny (permission). A question also takes
+	// QueueFormField: a JSON harnessproto.FormAnswer (question prompts v2,
+	// docs/question-prompts.md), which carries every feature of the form.
 	ActionQueueAnswer = "queue-answer"
 	// ActionQueueDismiss hides an entry from the queue: a decision_needed item
 	// is dismissed; a live question is hidden until it changes. Host only.
@@ -30,4 +32,11 @@ const (
 	QueueTextField   = "text"
 	QueueChoiceField = "choice"
 	QueueAllField    = "all"
+	QueueFormField   = "form"
+	// QueueByField names the answerer for the entry's claim ("host" when
+	// absent; direct sets "direct:<client>", the relay "cloud").
+	QueueByField = "by"
+	// QueueSessionField binds an answer to the session it was sent to (a
+	// VerbAnswer steer): an entry of another session is "asker_gone".
+	QueueSessionField = "session"
 )

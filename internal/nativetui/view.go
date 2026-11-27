@@ -615,6 +615,9 @@ func (m *model) renderMain() string {
 	if m.res.open {
 		return m.renderResources()
 	}
+	if m.qf != nil {
+		return m.renderQuestionForm()
+	}
 	if m.qp.open {
 		return m.renderQueue()
 	}
@@ -674,6 +677,8 @@ func (m *model) renderHelp() string {
 		return ansi.Truncate(hints("pull requests", []hint{{upDownKeys(), "move"}, {"Enter/o", "open in browser"}, {"p/Esc", "close"}}), m.w, "")
 	case m.res.open:
 		return ansi.Truncate(hints("resources", []hint{{"s", "sort CPU/mem"}, {upDownKeys(), "scroll"}, {"t/Esc", "close"}}), m.w, "")
+	case m.qf != nil:
+		return ansi.Truncate(hints("answer", []hint{{"Esc", "back to the queue"}}), m.w, "")
 	case m.qp.open:
 		return ansi.Truncate(hints("questions", []hint{{upDownKeys(), "select"}, {"y/n", "allow/deny"}, {"1-9", "choose"}, {"PgUp/PgDn", "scroll"}, {"r", "reply"}, {"a", "ack item"}, {"d", "hide"}, {"i/Esc", "close"}}), m.w, "")
 	case m.status != "":

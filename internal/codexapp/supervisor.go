@@ -121,8 +121,11 @@ type Supervisor struct {
 	rpc       *rpcConn
 	hub       *eventHub
 	approvals *approvalTracker
-	state     *streamState // owned by the read loop only
-	auth      *tokenAuth   // nil unless Config.ChatGPTAuth is set
+	// inputs tracks open request-user-input requests (userinput.go), apart
+	// from approvals so neither verb can answer the other.
+	inputs *approvalTracker
+	state  *streamState // owned by the read loop only
+	auth   *tokenAuth   // nil unless Config.ChatGPTAuth is set
 
 	mu       sync.Mutex
 	proc     *exec.Cmd
@@ -219,6 +222,7 @@ func New(cfg Config) *Supervisor {
 		cfg:       cfg,
 		hub:       newEventHub(),
 		approvals: newApprovalTracker(),
+		inputs:    newApprovalTracker(),
 		state:     &streamState{},
 		auth:      newTokenAuth(cfg.ChatGPTAuth, cfg.SessionID, cfg.ChatGPTAccount, cfg.AccountLaunch),
 	}
@@ -1145,10 +1149,14 @@ func (s *Supervisor) Resolve(_ context.Context, requestID, decision string) erro
 }
 
 // decisionToResult maps a contract decision onto the App Server approval
-// vocabulary: allow→accept, anything else→decline (never guess affirmatively).
+// vocabulary: allow→accept, allow_session→acceptForSession, anything
+// else→decline (never guess affirmatively).
 func decisionToResult(decision string) string {
-	if strings.EqualFold(decision, harnessproto.DecisionAllow) {
+	switch {
+	case strings.EqualFold(decision, harnessproto.DecisionAllow):
 		return "accept"
+	case strings.EqualFold(decision, harnessproto.DecisionAllowSession):
+		return "acceptForSession"
 	}
 	return "decline"
 }
@@ -1175,7 +1183,7 @@ func (s *Supervisor) AtSafePoint() (ok bool, why string) {
 		return false, "mid-turn"
 	case pending:
 		return false, "a prompt is starting a turn"
-	case len(s.approvals.open()) > 0:
+	case len(s.approvals.open()) > 0 || len(s.inputs.open()) > 0:
 		return false, "waiting on an approval"
 	}
 	return true, ""
@@ -1425,8 +1433,8 @@ func (s *Supervisor) onRequest(id json.RawMessage, method string, params json.Ra
 	switch {
 	case strings.HasSuffix(method, "/requestApproval"):
 		s.handleApproval(id, method, params)
-	case method == "tool/requestUserInput":
-		s.handleUserInput(id, params)
+	case isUserInputMethod(method):
+		s.handleUserInput(id, method, params)
 	case method == methodTokenRefresh:
 		// Consumed, never passed through as raw: the reply carries a token.
 		s.handleTokenRefresh(id, params)
@@ -1499,32 +1507,11 @@ func (s *Supervisor) handleApproval(id json.RawMessage, method string, params js
 			"item_id":    p.ItemID,
 			"options": []map[string]any{
 				{"id": "accept", "label": "Allow", "kind": "allow"},
+				{"id": "acceptForSession", "label": "Allow for session", "kind": "allow_session"},
 				{"id": "decline", "label": "Deny", "kind": "deny"},
 			},
 		}),
 	})
-}
-
-// handleUserInput represents a structured request-user-input. amux does NOT
-// auto-answer it (ROOT audit): with the native TUI (and other clients) attached to
-// the same server, answering empty here would preempt a client that can actually
-// collect the input. So the questions are surfaced as a notice + raw (nothing
-// lost) and the request is left open for another client to answer. The answer
-// shape, when a client does answer, is a MAP keyed by question id — not an array
-// (verified against Codex 0.153.4) — but amux is not that client here.
-func (s *Supervisor) handleUserInput(_ json.RawMessage, params json.RawMessage) {
-	var p struct {
-		Questions []struct {
-			Question string `json:"question"`
-		} `json:"questions"`
-	}
-	_ = json.Unmarshal(params, &p)
-	qs := make([]string, 0, len(p.Questions))
-	for _, q := range p.Questions {
-		qs = append(qs, q.Question)
-	}
-	s.emit(notice("info", "request-user-input awaiting a client: "+strings.Join(qs, " | ")))
-	s.emit(rawEvent("tool/requestUserInput", params))
 }
 
 // ── turn signalling ──────────────────────────────────────────────────────────
@@ -1622,6 +1609,9 @@ func (s *Supervisor) handleServerResolved(params json.RawMessage) {
 	if pinned == "" || p.ThreadID != pinned {
 		return
 	}
+	// A request-user-input resolved by any client leaves the queue (the
+	// daemon's question watcher reports it); nothing more to emit here.
+	s.inputs.serverResolved(idKey(p.RequestID))
 	if s.approvals.serverResolved(idKey(p.RequestID)) {
 		// Clear NEUTRALLY: the notification names no winning client or decision, and
 		// our own reply was only an attempt (a peer may have answered the other way).
@@ -1655,6 +1645,7 @@ func (s *Supervisor) clearApprovalsForTurn(turnID string) {
 	if turnID == "" {
 		return
 	}
+	s.inputs.drainForTurn(turnID)
 	for _, key := range s.approvals.drainForTurn(turnID) {
 		s.emit(permissionResolved(key, harnessproto.DecisionCleared))
 	}

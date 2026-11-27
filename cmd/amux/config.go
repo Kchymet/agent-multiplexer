@@ -77,6 +77,10 @@ func cmdConfig(args []string) error {
 			fmt.Println(onOff(on))
 			return nil
 		}
+		if args[1] == amuxcfg.QuestionHoldKey {
+			fmt.Println(onOff(amuxcfg.ResolveQuestionHold()))
+			return nil
+		}
 		if args[1] == amuxcfg.GoalAutoResumeKey {
 			on, err := amuxcfg.ResolveGoalAutoResume()
 			if err != nil {
@@ -136,6 +140,17 @@ func cmdConfig(args []string) error {
 			fmt.Printf("%s = %s  (saved; %s)\n", args[1], args[2], harnessSettingHint(args[1]))
 			return nil
 		}
+		if args[1] == amuxcfg.QuestionHoldKey {
+			on, err := amuxcfg.ParseOnOff(amuxcfg.QuestionHoldKey, args[2])
+			if err != nil {
+				return err
+			}
+			if err := amuxcfg.SetQuestionHold(&on); err != nil {
+				return err
+			}
+			fmt.Printf("%s = %s  (saved; applies to the next question)\n", amuxcfg.QuestionHoldKey, onOff(on))
+			return nil
+		}
 		if args[1] == amuxcfg.AutoUpdateKey {
 			on, err := amuxcfg.ParseOnOff(amuxcfg.AutoUpdateKey, args[2])
 			if err != nil {
@@ -191,6 +206,13 @@ func cmdConfig(args []string) error {
 				return err
 			}
 			fmt.Printf("%s = %s  (default; %s)\n", args[1], harnessSettingLabel(args[1], ""), harnessSettingHint(args[1]))
+			return nil
+		}
+		if args[1] == amuxcfg.QuestionHoldKey {
+			if err := amuxcfg.SetQuestionHold(nil); err != nil {
+				return err
+			}
+			fmt.Printf("%s = on  (default)\n", amuxcfg.QuestionHoldKey)
 			return nil
 		}
 		if args[1] == amuxcfg.AutoUpdateKey {
@@ -279,6 +301,15 @@ func configList() error {
 		fmt.Printf("%s on  (default; %s=1 also disables)\n", amuxcfg.AutoUpdateKey, selfupdate.DisableEnv)
 	default:
 		fmt.Printf("%s %s  (saved)\n", amuxcfg.AutoUpdateKey, onOff(autoUpdate))
+	}
+	hold, holdSet, holdErr := amuxcfg.QuestionHold()
+	switch {
+	case holdErr != nil:
+		fmt.Printf("%s INVALID\n", amuxcfg.QuestionHoldKey)
+	case !holdSet:
+		fmt.Printf("%s on  (default)\n", amuxcfg.QuestionHoldKey)
+	default:
+		fmt.Printf("%s %s  (saved)\n", amuxcfg.QuestionHoldKey, onOff(hold))
 	}
 	direct, directSet, directErr := directsvc.Load()
 	switch {

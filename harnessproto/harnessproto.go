@@ -167,6 +167,13 @@ const (
 	VerbStop       = "stop"
 	VerbPermission = "permission"
 	VerbGoal       = "goal"
+	// VerbAnswer answers (or dismisses) a question form the runtime surfaced as
+	// a TypeQuestionRequest event (question.go): FieldRequestID echoes its
+	// request_id, FieldRuntimeGeneration its runtime_generation, and
+	// FieldAnswer carries the JSON-encoded FormAnswer. Like VerbPermission it is
+	// correlated: a daemon MUST refuse a request_id that does not name an open
+	// form ("asker_gone") and a second answer to one ("answered").
+	VerbAnswer = "answer"
 )
 
 // SessionVerbs is the closed set of accepted session-action verbs. A consumer
@@ -188,6 +195,7 @@ var SessionVerbs = map[string]bool{
 	VerbStop:              true,
 	VerbPermission:        true,
 	VerbGoal:              true,
+	VerbAnswer:            true,
 }
 
 // SteeringVerbs is the subset of SessionVerbs that steers the agent inside a
@@ -200,6 +208,7 @@ var SteeringVerbs = map[string]bool{
 	VerbStop:       true,
 	VerbPermission: true,
 	VerbGoal:       true,
+	VerbAnswer:     true,
 }
 
 // session-action field keys (MuxMsg.Fields) for the steering verbs. Lifecycle
@@ -210,6 +219,7 @@ const (
 	FieldRequestID = "request_id" // permission: the request_id from the permission_request event
 	FieldDecision  = "decision"   // permission: DecisionAllow | DecisionDeny
 	FieldReason    = "reason"     // permission: optional free-text rationale
+	FieldAnswer    = "answer"     // answer: the JSON-encoded FormAnswer
 	// FieldRuntimeGeneration is the daemon-issued opaque identity of the live
 	// runtime that published a permission request. A permission decision must
 	// echo it so a request id cannot be replayed against a replacement runtime;
@@ -250,6 +260,11 @@ var GoalStatuses = map[string]bool{
 const (
 	DecisionAllow = "allow"
 	DecisionDeny  = "deny"
+	// DecisionAllowSession allows the request and every later one like it
+	// for the rest of the session. Only a runtime whose permission_request
+	// options list an option of kind "allow_session" accepts it (Codex
+	// structured: acceptForSession); a daemon refuses it elsewhere.
+	DecisionAllowSession = "allow_session"
 )
 
 // DecisionCleared is the resolution a TypePermissionResolved event carries when
@@ -434,7 +449,12 @@ type HarnessMsg struct {
 	Sessions []Session `json:"sessions,omitempty"` // sessions: full inventory snapshot (Seq is per-connection monotonic)
 	ReqID    string    `json:"reqId,omitempty"`    // session-result: echoes the session-action reqId
 	OK       bool      `json:"ok,omitempty"`       // session-result: verb succeeded
-	NewID    string    `json:"newId,omitempty"`    // session-result: id of any session the verb created
+	// Code is a failed session-result's stable failure class, when the daemon
+	// gave one — the question answer refusals asker_gone, answered,
+	// needs_newer_client, delivery_failed and answer_in_pane (question.go) —
+	// so a relaying consumer can tell them apart without parsing Error.
+	Code  string `json:"code,omitempty"`
+	NewID string `json:"newId,omitempty"` // session-result: id of any session the verb created
 	// Result is the disposition of a successful verb: ResultApplied (effect is
 	// complete) or ResultAccepted (validated and taken on; the effect is
 	// asynchronous). Empty means applied, so a daemon predating the field is read

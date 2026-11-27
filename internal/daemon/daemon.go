@@ -281,6 +281,19 @@ type Daemon struct {
 	// (tests only).
 	queue          queueState
 	queueSourcesFn func() queueSources
+	// queuePromptFn, when non-nil, replaces the typed delivery of a queue
+	// answer (tests).
+	queuePromptFn func(ctx context.Context, id, text string) core.Result
+	// holds are Claude AskUserQuestion calls held for an answer from any amux
+	// surface (question_hold.go); holdEnabledFn and lastHumanInputFn replace
+	// the config switch and the pane's input clock (tests).
+	holds            questionHolds
+	holdEnabledFn    func() bool
+	lastHumanInputFn func(session string) time.Time
+	// questionWatch diffs open questions after each poll (question_watch.go);
+	// emitQuestionFn replaces where its events are recorded (tests).
+	questionWatch  questionWatch
+	emitQuestionFn func(session, typ string, payload any)
 	// prWakeAdmission runs after a watcher delivery holds its final membership,
 	// repo, and coordinator admission. Production leaves it nil; tests use it to
 	// prove mutations cannot cross the authority recheck and prompt boundary.
@@ -900,6 +913,7 @@ func (d *Daemon) pollOnce(ctx context.Context) {
 	d.mu.Unlock()
 	d.broadcast()
 	d.observeWorkgroups(all)
+	d.watchQuestions()
 
 	// Snapshot the live engine set each poll so a crash leaves a recent record;
 	// then release restore, which waited for sessions/specs to resolve.

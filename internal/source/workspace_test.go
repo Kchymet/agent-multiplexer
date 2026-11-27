@@ -84,7 +84,7 @@ func TestUntrackedRows(t *testing.T) {
 // identity — a Codex row is never mislabeled Claude); a non-steerable row keeps
 // its identity but gets an explicit non-nil all-false block.
 func TestWithCaps(t *testing.T) {
-	claudeCaps := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: false}
+	claudeCaps := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: false, Question: true} // the question hold
 
 	claude := (&Workspace{}).withCaps(core.Session{ID: "a", Kind: "claude"}, true)
 	if claude.Runtime != "claude" {
@@ -190,7 +190,7 @@ func TestPollCapsByControlPath(t *testing.T) {
 		byID[r.ID] = r
 	}
 
-	claudeCaps := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: false}
+	claudeCaps := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: false, Question: true} // the question hold
 	off := core.SessionCaps{}
 
 	// Tracked, active agent — full caps.

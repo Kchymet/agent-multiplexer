@@ -12,6 +12,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/items"
 	"amux/internal/queue"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // The question queue panel (i on the rail): every pending question for the
@@ -41,6 +42,9 @@ type queuePanel struct {
 	// scroll is the desired first body row; rendering clamps it so the
 	// selected entry stays in view at the current width.
 	scroll int
+	// released are held questions this TUI handed back to their pane on
+	// focus (question_form.go), so each is released once.
+	released map[string]bool
 }
 
 func (q *queuePanel) interval() time.Duration {
@@ -163,7 +167,9 @@ func (m *model) handleQueueKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "r", "enter":
-		if has && e.Kind != queue.KindPermission {
+		if has && e.Kind == queue.KindQuestion && e.Form != nil && e.Form.Version == harnessproto.FormVersion {
+			m.openQuestionForm(e)
+		} else if has && e.Kind != queue.KindPermission {
 			m.openQueueReplyForm(e)
 		}
 	case "d":
@@ -424,6 +430,9 @@ func queueEntryLines(e queue.Entry, selected bool, w int) []string {
 			}
 		}
 		k := keyStyle.Render("r") + dim(" reply  ") + keyStyle.Render("d") + dim(" hide")
+		if e.Form != nil && e.Form.Version == harnessproto.FormVersion {
+			k = keyStyle.Render("Enter") + dim(" answer  ") + keyStyle.Render("d") + dim(" hide")
+		}
 		if len(e.Questions) == 1 && !e.Questions[0].MultiSelect && len(e.Questions[0].Options) > 0 {
 			k = keyStyle.Render("1-9") + dim(" choose  ") + k
 		}

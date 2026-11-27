@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // approvals.go tracks the App Server's outstanding approval requests so the
@@ -42,6 +44,8 @@ type pendingApproval struct {
 	turnID   string
 	itemID   string
 	state    approvalState
+	// form is set on a request-user-input (userinput.go).
+	form *harnessproto.Form
 }
 
 // approvalTracker holds the live approvals plus the ids already resolved (for

@@ -12,6 +12,7 @@ import (
 	"amux/internal/items"
 	"amux/internal/queue"
 	"amux/internal/sessionrpc"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // amux inbox — the user question queue (internal/queue, docs/direct-console.md
@@ -81,11 +82,22 @@ func cmdQueue(args []string) error {
 		if len(args) < 1 {
 			return usageErr("inbox answer")
 		}
+		if isFormAnswer(args[1:]) {
+			return inboxFormAnswer(args[0], args[1:])
+		}
 		fields, err := queueAnswerFields(args[0], args[1:])
 		if err != nil {
 			return err
 		}
 		return queueHostAction(core.Action{Action: core.ActionQueueAnswer, Fields: fields}, "answered "+args[0])
+	case "questions":
+		return questionList(args, os.Stdout)
+	case "show":
+		return questionShow(args, os.Stdout)
+	case "cancel":
+		return inboxCancel(args)
+	case "release":
+		return inboxRelease(args)
 	case "dismiss":
 		if len(args) != 1 {
 			return usageErr("inbox dismiss")
@@ -214,7 +226,11 @@ func renderQueue(w io.Writer, o queue.Overview) {
 					fmt.Fprintln(w)
 				}
 			}
-			fmt.Fprintf(w, "    answer: amux inbox answer %s --choice <label>  (or free text)\n", e.ID)
+			if e.Form != nil && e.Form.Version == harnessproto.FormVersion {
+				fmt.Fprintf(w, "    answer: amux inbox answer %s --select <label|n> ...  (amux inbox show %s for the whole form)\n", e.ID, e.ID)
+			} else {
+				fmt.Fprintf(w, "    answer: amux inbox answer %s --choice <label>  (or free text)\n", e.ID)
+			}
 		case queue.KindPermission:
 			if e.Body != "" {
 				fmt.Fprintf(w, "    %s\n", oneLine(e.Body, 200))

@@ -11,6 +11,9 @@ Settings:
                                         waiting goal (default on; read at daemon start)
   update.auto on|off                    automatic amux self-update (default on;
                                         AMUX_NO_AUTO_UPDATE=1 also disables)
+  questions.claude_hold on|off          hold Claude's AskUserQuestion so any amux surface
+                                        can answer it (default on; released to the pane on
+                                        input; off = answer in the pane)
   harnesses.update off|notify|auto      daemon update check for managed harnesses
   harnesses.check_interval <dur>        how often that check runs (24h; minimum 1h)
   harnesses.<claude|codex>.channel <c>  release channel to follow (claude: stable|latest)

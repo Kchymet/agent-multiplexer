@@ -119,9 +119,18 @@ const (
 	// SteerGoalObjective and SteerGoalBudget. Pausing and resuming here are the
 	// user's decisions; ordinary prompts never override them.
 	SteerGoal = "goal"
+	// SteerAnswer answers a question form (harnessproto.VerbAnswer):
+	// SteerRequestID names the queue entry, SteerAnswerField carries the
+	// JSON-encoded harnessproto.FormAnswer. The daemon serves it as a queue
+	// answer bound to this session.
+	SteerAnswer      = "answer"
+	SteerAnswerField = "answer"
 
 	SteerAllow = "allow"
 	SteerDeny  = "deny"
+	// SteerAllowSession allows for the rest of the session
+	// (harnessproto.DecisionAllowSession): structured Codex only.
+	SteerAllowSession = "allow_session"
 )
 
 // Lifecycle action verbs (Action.Action values) — the control vocabulary the CLI,
@@ -178,6 +187,7 @@ var controlActions = []string{
 	ActionEscalateItem,
 	ActionQueueAnswer,
 	ActionQueueDismiss,
+	ActionQueueRelease,
 }
 
 // ControlActions returns the action verbs a caller may drive over the socket

@@ -1,0 +1,4 @@
+{
+  "code": "delivery_failed",
+  "error": "amux could not deliver the answer; nothing reached the agent and the question is open again"
+}

@@ -77,12 +77,15 @@ func TestQuestionHookInstalledWithMatcher(t *testing.T) {
 		}
 	}
 	groups, _ := root["hooks"].(map[string]any)["PreToolUse"].([]any)
-	if len(groups) != 1 {
-		t.Fatalf("PreToolUse groups = %v, want exactly the question hook", groups)
+	if len(groups) != 2 {
+		t.Fatalf("PreToolUse groups = %v, want the question status hook and the question hold", groups)
 	}
 	g := groups[0].(map[string]any)
 	if g["matcher"] != "AskUserQuestion" || groupCommand(g) != "/opt/amux agent hook waiting" {
 		t.Fatalf("PreToolUse group = %v", g)
+	}
+	if h := groups[1].(map[string]any); h["matcher"] != "AskUserQuestion" || groupCommand(h) != "/opt/amux agent question hold" {
+		t.Fatalf("PreToolUse hold group = %v", h)
 	}
 	for _, event := range []string{"PostToolUse", "Notification", "Stop"} {
 		for _, g := range root["hooks"].(map[string]any)[event].([]any) {

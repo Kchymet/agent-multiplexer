@@ -52,7 +52,7 @@ func TestSteeringVerbStrings(t *testing.T) {
 // an orchestrator screens against SessionVerbs before sending, so a verb missing
 // here is unsendable — and that SteeringVerbs is exactly the steering set.
 func TestSteeringVerbsAccepted(t *testing.T) {
-	want := map[string]bool{VerbPrompt: true, VerbInterject: true, VerbStop: true, VerbPermission: true, VerbGoal: true}
+	want := map[string]bool{VerbPrompt: true, VerbInterject: true, VerbStop: true, VerbPermission: true, VerbGoal: true, VerbAnswer: true}
 	if !reflect.DeepEqual(SteeringVerbs, want) {
 		t.Fatalf("SteeringVerbs = %v, want %v", SteeringVerbs, want)
 	}

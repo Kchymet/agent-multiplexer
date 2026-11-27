@@ -266,6 +266,11 @@ type SessionCaps struct {
 	Cancel     bool `json:"cancel"`     // interrupt the in-flight turn without killing the session
 	Permission bool `json:"permission"` // answer a correlated permission_request (see the type doc)
 	Goal       bool `json:"goal"`       // control the session's goal (see above)
+	// Question: the daemon can deliver a v2 question answer (VerbAnswer) for
+	// this session's runtime under its default configuration. The open form's
+	// own Delivery is authoritative per prompt (it reads "pane" when amux
+	// cannot deliver that one).
+	Question bool `json:"question,omitempty"`
 }
 
 // Control modes for Session.ControlMode (AGE-181): how a published session's

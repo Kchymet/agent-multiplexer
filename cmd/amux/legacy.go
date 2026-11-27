@@ -69,6 +69,16 @@ var legacyRules = func() []legacyRule {
 		add(q+" reply", "inbox answer")
 		add(q, "inbox")
 	}
+	// amux question (workgroup 7bead5) moved under amux inbox before release.
+	for _, r := range [][2]string{
+		{"list", "inbox questions"}, {"ls", "inbox questions"},
+		{"show", "inbox show"}, {"answer", "inbox answer"},
+		{"cancel", "inbox cancel"}, {"dismiss", "inbox cancel"},
+		{"release", "inbox release"},
+	} {
+		add("question "+r[0], r[1])
+	}
+	add("question", "inbox questions")
 	add("direct enroll", "device connect")
 	add("direct clients list", "device ls")
 	add("direct clients ls", "device ls")

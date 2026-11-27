@@ -67,8 +67,13 @@ type Entry struct {
 	// render as plain text).
 	Title string `json:"title"`
 	Body  string `json:"body,omitempty"`
-	// Questions are an AskUserQuestion's questions and options.
+	// Questions are an AskUserQuestion's questions and options: the legacy
+	// view, filled from Form by ProjectLegacy (empty when a legacy client
+	// cannot answer the form correctly).
 	Questions []Question `json:"questions,omitempty"`
+	// Form is the question prompt v2 envelope (docs/question-prompts.md):
+	// every feature of the question, and how amux will deliver an answer.
+	Form *harnessproto.Form `json:"form,omitempty"`
 	// Tool and Action describe a permission request; RequestID and
 	// RuntimeGeneration bind its answer.
 	Tool              string `json:"tool,omitempty"`

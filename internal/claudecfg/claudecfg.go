@@ -680,6 +680,9 @@ type HookPayload struct {
 	// PostToolUse, PermissionDenied) and empty on the rest.
 	ToolName  string          `json:"tool_name"`
 	ToolInput json.RawMessage `json:"tool_input"`
+	// ToolUseID names the tool call on the tool events (the question hold
+	// binds its answer to it).
+	ToolUseID string `json:"tool_use_id"`
 	// NotificationType and Message are carried by the Notification event:
 	// permission_prompt, idle_prompt, auth_success, elicitation_dialog, ...
 	NotificationType string `json:"notification_type"`
@@ -985,8 +988,27 @@ func GoalHookCommand(event string) (sub string, ok bool) {
 // Goal hooks stay blocking: their stdout is the continuation decision.
 const observationHookTimeout = 15 // seconds
 
+// QuestionHoldHookTimeout is the Claude hook timeout (seconds) of the
+// question hold (docs/question-prompts.md §4.1): the blocking PreToolUse hook
+// that holds an AskUserQuestion for an answer from any amux surface. The
+// daemon releases the hold well before it (QuestionHoldMargin), so Claude
+// never kills the hook; the hook also stops on its own deadline.
+const QuestionHoldHookTimeout = 1800
+
+// QuestionHoldMargin is how long before a timeout (the hook's, or the user's
+// askUserQuestionTimeout) the hold is released to the pane.
+const QuestionHoldMargin = 60 * time.Second
+
+// questionHoldCommand marks the hold hook (blocking, long timeout).
+const questionHoldCommand = " agent question hold"
+
 func hookCommand(cmd string) map[string]any {
 	h := map[string]any{"type": "command", "command": cmd}
+	if strings.Contains(cmd, questionHoldCommand) {
+		// Blocking: its stdout answers the AskUserQuestion call.
+		h["timeout"] = QuestionHoldHookTimeout
+		return h
+	}
 	if !strings.Contains(cmd, " agent goal ") {
 		h["async"] = true
 		h["timeout"] = observationHookTimeout
@@ -1024,6 +1046,12 @@ func encodeHooks(root map[string]any, amuxPath string, inherited map[string]any,
 	for _, ev := range captureEvents {
 		amuxCmds[ev] = append(amuxCmds[ev], amuxPath+" agent capture --hook")
 	}
+	// The question hold: a blocking PreToolUse hook on AskUserQuestion. It is
+	// always installed; the daemon releases at once when the user turned it
+	// off (questions.claude_hold), and the hook fails open to Claude's dialog.
+	holdCmd := amuxPath + questionHoldCommand
+	amuxCmds["PreToolUse"] = append(amuxCmds["PreToolUse"], holdCmd)
+	matchers["PreToolUse\x00"+holdCmd] = QuestionTool
 	for _, ph := range permissionHooks {
 		amuxCmds[ph.event] = append(amuxCmds[ph.event], amuxPath+" agent permission "+ph.verb+" --hook")
 	}
@@ -1260,4 +1288,27 @@ func isAmuxHookGroup(g any) bool {
 		}
 	}
 	return false
+}
+
+// AskUserQuestionTimeout reads this home's askUserQuestionTimeout setting
+// (60s, 5m, 10m, never; default never): how long Claude's own question
+// dialog waits before auto-continuing. ok is false for never, unset or
+// unreadable.
+func (h Home) AskUserQuestionTimeout() (d time.Duration, ok bool) {
+	b, err := os.ReadFile(h.SettingsPath())
+	if err != nil {
+		return 0, false
+	}
+	var s struct {
+		Timeout string `json:"askUserQuestionTimeout"`
+	}
+	if json.Unmarshal(b, &s) != nil {
+		return 0, false
+	}
+	v := strings.TrimSpace(s.Timeout)
+	if v == "" || v == "never" {
+		return 0, false
+	}
+	d, err = time.ParseDuration(v)
+	return d, err == nil && d > 0
 }
