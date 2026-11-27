@@ -174,15 +174,17 @@ direct HTTPS access for Harness web and Android clients.
   own. See `docs/sandbox-config.md`.
 - **Archive** — `x` marks an agent (or workgroup) done/archived: it drops into a
   collapsed **ARCHIVED** section and its session is stopped. Reversible (`x` again,
-  or `amux wg unarchive <id>`). Workgroups are never archived automatically:
-  when a coordinator's goal completes, the workgroup stays on the active rail
-  with its completed goal visible, and the coordinator asks whether to archive
-  it or take another task. Its own finished members (PR merged or closed, or
+  or `amux wg unarchive <id>`). Goal completion alone never archives a
+  workgroup: the workgroup stays on the active rail with its completed goal
+  visible. While its PRs await only your merge, the coordinator waits for the
+  merge without asking; once they are merged and nothing is pending it archives
+  itself, and it asks whether to archive only when it is unsure the work is
+  done. Its own finished members (PR merged or closed, or
   task delivered with no PR), though, it is expected to archive itself as it
   goes (`amux do set-archived <member> -f archived=true`), so a long-done
   workgroup does not keep showing live members; a member that still owns an
-  open PR is never archived. After explicit user confirmation, the coordinator can
-  run `amux agent done` to archive its workgroup and all direct members, stopping
+  open PR is never archived. The coordinator archives with
+  `amux agent done`, which archives its workgroup and all direct members, stopping
   runtimes and revoking credentials. Host workgroup restoration also restores
   previously active members; already-completed members stay archived. Task-mode
   member agents still use `amux agent done` to archive only themselves — once

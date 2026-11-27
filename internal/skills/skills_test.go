@@ -90,7 +90,9 @@ func TestInstalledCreatePRCoordinatorWrapUp(t *testing.T) {
 	for _, want := range []string{
 		"wraps up its own workgroup with `amux agent done`",
 		"every PR the workgroup produced is MERGED, checked on GitHub by the coordinator itself (`gh pr view <n> --json state,mergedAt`)",
-		"a PR was closed without merging",
+		"a PR closed without merging",
+		"While the only remaining step is the user's merge, wait — do not ask.",
+		"archive without asking once every PR is MERGED",
 		"When in doubt, ask; never guess.",
 		"Never pass `--force` to archive yourself",
 		"run `amux agent done` as the last tool call",
@@ -101,6 +103,9 @@ func TestInstalledCreatePRCoordinatorWrapUp(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("installed coordinator policy missing %q", want)
 		}
+	}
+	if strings.Contains(text, "waiting on my PR merge") {
+		t.Error("installed skill still makes waiting on a merge a question")
 	}
 	if strings.Contains(text, "coordinator **never** archives") {
 		t.Fatal("installed skill still prohibits confirmed coordinator archive")
