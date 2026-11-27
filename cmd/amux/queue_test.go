@@ -33,6 +33,77 @@ func TestQueueAnswerFields(t *testing.T) {
 	}
 }
 
+func TestQueueAnswerFieldsAnswers(t *testing.T) {
+	f, err := queueAnswerFields("q-1", []string{"--answers", `[{"choice":["a"]},{"other":"x"}]`})
+	if err != nil || f[core.QueueAnswersField] != `[{"choice":["a"]},{"other":"x"}]` {
+		t.Fatalf("answers = %v, %v", f, err)
+	}
+	for _, bad := range [][]string{{"--answers", "{"}, {"--answers"}, {"--answers=[]", "--choice", "a"}} {
+		if _, err := queueAnswerFields("q-1", bad); err == nil {
+			t.Errorf("queueAnswerFields(%v) accepted", bad)
+		}
+	}
+}
+
+func TestQueueAnswerInteractive(t *testing.T) {
+	e := queue.Entry{ID: "q-1", Kind: queue.KindQuestion, Questions: []queue.Question{
+		{Header: "Scope", Question: "Which parts should the change touch, given that the rollout has to cover every service the billing team owns?", MultiSelect: true,
+			Options: []queue.Option{{Label: "api", Description: "the public API"}, {Label: "web"}, {Label: "cli", Preview: "amux inbox"}}},
+		{Header: "Ship", Question: "Ship today?", Options: []queue.Option{{Label: "yes"}, {Label: "no"}}},
+		{Question: "Anything else?"},
+		{Question: "Skipped?", Options: []queue.Option{{Label: "a"}}},
+	}}
+	// Scope: options 3 and 1 plus words; Ship: an out-of-range number is
+	// own text; Anything else: a line; the last is skipped.
+	var out bytes.Buffer
+	f, err := queueAnswerInteractive(e, strings.NewReader("3, 1 and docs\n7\nnothing more\n\n"), &out, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"choice":["cli","api"],"other":"and docs"},{"other":"7"},{"other":"nothing more"},{}]`
+	if f[core.QueueAnswersField] != want || f[core.QueueEntryField] != "q-1" {
+		t.Errorf("fields = %v, want answers %s", f, want)
+	}
+	text := out.String()
+	for _, w := range []string{"billing team owns?", "(choose any, or type your own)", "1. api", "the public API", "| amux inbox", "(type an answer)"} {
+		if !strings.Contains(text, w) {
+			t.Errorf("prompt missing %q:\n%s", w, text)
+		}
+	}
+	for _, l := range strings.Split(text, "\n") {
+		if len([]rune(l)) > 80 {
+			t.Errorf("unwrapped line %q", l)
+		}
+	}
+	// Nothing answered at all is refused.
+	if _, err := queueAnswerInteractive(e, strings.NewReader("\n\n\n\n"), &out, 60); err == nil {
+		t.Error("an empty interactive answer was accepted")
+	}
+	// A permission asks allow or deny until it gets one.
+	f, err = queueAnswerInteractive(queue.Entry{ID: "p-1", Kind: queue.KindPermission, Title: "permission: Bash", Body: "rm -rf build"}, strings.NewReader("maybe\nd\n"), &out, 60)
+	if err != nil || f[core.SteerDecision] != core.SteerDeny {
+		t.Errorf("permission = %v, %v", f, err)
+	}
+	f, err = queueAnswerInteractive(queue.Entry{ID: "g-1", Kind: queue.KindGoalInput, Title: "Region?"}, strings.NewReader("eu-west\n"), &out, 60)
+	if err != nil || f[core.QueueTextField] != "eu-west" {
+		t.Errorf("goal = %v, %v", f, err)
+	}
+}
+
+func TestRenderQueueShowsWholeText(t *testing.T) {
+	long := "Should the settings page use tabs, one long scrolling page, or a wizard that walks through each section in order? Consider that most users only change one setting per visit."
+	ov := queue.Overview{Entries: []queue.Entry{{ID: "q-1", Kind: queue.KindQuestion, Session: "m1", Title: long,
+		Questions: []queue.Question{{Header: "Layout", Question: long, Options: []queue.Option{{Label: "Tabs", Description: strings.Repeat("a long description ", 12) + "end."}}}}}}}
+	var b bytes.Buffer
+	renderQueue(&b, ov)
+	joined := strings.Join(strings.Fields(b.String()), " ")
+	for _, want := range []string{"[Layout] " + long, "a long description end.", "(choose one, or type your own)"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("render cut %q:\n%s", want, b.String())
+		}
+	}
+}
+
 func TestRenderQueueFlattensAgentText(t *testing.T) {
 	ov := queue.Overview{
 		Entries: []queue.Entry{

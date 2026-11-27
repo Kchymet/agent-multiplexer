@@ -1207,8 +1207,16 @@ entries and the active global-inbox items.
 - **Entries** (`QueueEntry`):
   - Common fields: `id`, `kind` (`question` · `permission` · `goal_input` ·
     `decision_needed`), `state` (always `open`), `session_id`, `session_title`,
-    `workgroup`, `title`, `body`, `created_at` (Unix ms, when known).
-  - `question`: `questions[]`, each `{header, question, options[{label, description}], multi_select}`.
+    `workgroup`, `title`, `body`, `created_at` (Unix ms, when known), and
+    `input`: the control the entry is answered with — `questions` (each of
+    `questions[]` with its own control), `decision` (allow / deny) or `text`.
+  - `question`: `questions[]`, each `{header, question, options[{label,
+    description, preview}], multi_select, input, allow_other}`. `input` is
+    `single_select` (pick one), `multi_select` (toggle any, then send) or
+    `text` (no options: a typed answer); `allow_other` means free text may
+    replace a single_select's pick or be added to a multi_select's (Claude's
+    selector always offers it). `preview` is optional plain text shown with
+    the option. See [question-prompts.md](question-prompts.md).
   - `permission`: `tool`, `action`, `request_id`, `runtime_generation` (a
     string; echo it back unchanged).
   - `decision_needed`: `item_id`, `suggested_action`, `prs`, `links`.
@@ -1242,12 +1250,12 @@ It closes with the same codes as the sessions watch.
 ### Answering
 
 **`POST /direct/v1/queue/{entry_id}/answer`** takes
-`{idem_key, answer?, choice?, decision?, runtime_generation?}`, with an exact
-allowlist per kind:
+`{idem_key, answers?, answer?, choice?, decision?, runtime_generation?}`, with
+an exact allowlist per kind:
 
 | Kind | Permission | Fields |
 | --- | --- | --- |
-| `question` | steer | `answer` (free text) **or** `choice` (option labels). `choice` applies only to an entry with exactly one question, and takes several labels only when that question is `multi_select`. Answer a multi-question entry with formatted text. `runtime_generation` is accepted and ignored |
+| `question` | steer | Exactly one of: `answers` — one `{choice?: [labels], other?: text}` per question, in `questions[]` order (an empty object, or a missing tail, leaves a question unanswered; at least one must be answered; at most one label unless `multi_select`; `other` only on a `text` question or with `allow_other`, and not together with a single_select's choice) — the form for every question shape; **or** the older `answer` (free text) or `choice` (option labels; only for an entry with exactly one question, several labels only when it is `multi_select`). `runtime_generation` is accepted and ignored |
 | `permission` | approve | `decision` (`allow` · `deny`) and `runtime_generation` (the entry's) |
 | `goal_input` | steer | `answer` |
 | `decision_needed` | steer | `answer` (recorded on the item and delivered to its source) |

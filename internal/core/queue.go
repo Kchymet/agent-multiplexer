@@ -16,7 +16,8 @@ const (
 	// entry against fresh state. Host only. Fields: QueueEntryField, and per
 	// kind: QueueTextField (question, goal_input, decision_needed) or
 	// QueueChoiceField (question: option labels, newline-separated), or
-	// SteerDecision allow|deny (permission).
+	// QueueAnswersField (question: one answer per question, JSON — see
+	// queue.Answer), or SteerDecision allow|deny (permission).
 	ActionQueueAnswer = "queue-answer"
 	// ActionQueueDismiss hides an entry from the queue: a decision_needed item
 	// is dismissed; a live question is hidden until it changes. Host only.
@@ -29,5 +30,9 @@ const (
 	QueueEntryField  = "entry"
 	QueueTextField   = "text"
 	QueueChoiceField = "choice"
-	QueueAllField    = "all"
+	// QueueAnswersField carries a question entry's per-question answers as a
+	// JSON array of queue.Answer ({"choice":[labels],"other":"text"}), in the
+	// questions' order. It replaces QueueChoiceField and QueueTextField.
+	QueueAnswersField = "answers"
+	QueueAllField     = "all"
 )

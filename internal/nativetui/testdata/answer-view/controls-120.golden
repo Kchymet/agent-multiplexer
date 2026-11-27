@@ -1,0 +1,24 @@
+
+ [Scope] Which parts of the service should this change touch? Pick every part the rollout plan has to cover before we
+ start.
+   choose any, or type your own
+    [✔] 1. api
+           the public HTTP API and its OpenAPI document
+    [ ] 2. web
+ ▸  [✔] 3. cli
+           │ amux inbox answer <id>
+           │   --choice <label>
+    Other: and the docs site, which links to every endpoint
+
+ [Ship] Ship today?
+   choose one, or type your own
+    ( ) 1. yes
+    (•) 2. no
+           wait for the review
+    Other: …
+
+ Anything else the reviewer should know?
+   type an answer
+    Answer: …
+
+   Send answer

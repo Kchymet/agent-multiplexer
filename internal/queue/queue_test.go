@@ -56,6 +56,74 @@ func TestFormatAnswerMatchesThePhoneCard(t *testing.T) {
 	}
 }
 
+func TestParseQuestionsDerivesTheInput(t *testing.T) {
+	raw := json.RawMessage(`{"questions":[
+		{"question":" Pick one ","header":" H ","options":[{"label":" A "},{"label":""},{"label":"A"},{"label":"B","preview":"code"}]},
+		{"question":"Pick many","options":[{"label":"x"}],"multiSelect":true},
+		{"question":"Say anything","multiSelect":true}]}`)
+	qs, ok := ParseQuestions(raw)
+	if !ok || len(qs) != 3 {
+		t.Fatalf("ParseQuestions = %+v, %v", qs, ok)
+	}
+	if q := qs[0]; q.Question != "Pick one" || q.Header != "H" || len(q.Options) != 2 || q.Options[0].Label != "A" || q.Options[1].Preview != "code" ||
+		q.Input != InputSingleSelect || !q.AllowOther {
+		t.Errorf("single = %+v", q)
+	}
+	if q := qs[1]; q.Input != InputMultiSelect || !q.AllowOther {
+		t.Errorf("multi = %+v", q)
+	}
+	if q := qs[2]; q.Input != InputText || q.MultiSelect || q.AllowOther {
+		t.Errorf("text = %+v", q)
+	}
+	if EntryInput(KindQuestion) != InputQuestions || EntryInput(KindPermission) != InputDecision || EntryInput(KindGoalInput) != InputText || EntryInput(KindDecision) != InputText {
+		t.Error("EntryInput")
+	}
+}
+
+func TestValidateAndFormatAnswers(t *testing.T) {
+	qs, _ := ParseQuestions(json.RawMessage(`{"questions":[
+		{"header":"Scope","question":"Which parts?","options":[{"label":"api"},{"label":"web"},{"label":"cli"}],"multiSelect":true},
+		{"header":"Ship","question":"Ship today?","options":[{"label":"yes"},{"label":"no"}]},
+		{"question":"Anything else?"}]}`))
+	good := []Answer{{Choice: []string{"cli", "api"}, Other: " docs\ttoo "}, {Other: "after review"}, {Other: "line one\nline two"}}
+	if err := ValidateAnswers(qs, good); err != nil {
+		t.Fatalf("valid answers refused: %v", err)
+	}
+	// Labels in option order, Other last; several answers flatten to a line each.
+	want := "Scope: api, cli, docs too\nShip: after review\nAnything else?: line one line two"
+	if got := FormatAnswers(qs, good); got != want {
+		t.Errorf("FormatAnswers = %q, want %q", got, want)
+	}
+	// Unanswered questions are left out.
+	if got := FormatAnswers(qs, []Answer{{}, {Choice: []string{"no"}}}); got != "Ship: no" {
+		t.Errorf("partial = %q", got)
+	}
+	for name, as := range map[string][]Answer{
+		"too many":          {{Other: "a"}, {Other: "b"}, {Other: "c"}, {Other: "d"}},
+		"none":              {{}, {Other: "  "}},
+		"unknown label":     {{Choice: []string{"docs"}}},
+		"repeated label":    {{Choice: []string{"api", "api"}}},
+		"two on single":     {{}, {Choice: []string{"yes", "no"}}},
+		"choice and other":  {{}, {Choice: []string{"yes"}, Other: "maybe"}},
+		"choice on text":    {{}, {}, {Choice: []string{"yes"}}},
+		"empty answer list": nil,
+	} {
+		if err := ValidateAnswers(qs, as); err == nil {
+			t.Errorf("%s: accepted %+v", name, as)
+		}
+	}
+	// A lone question keeps its text answer whole; shared headers fall back to
+	// the question text.
+	one := qs[2:]
+	if got := FormatAnswers(one, []Answer{{Other: " line one\nline two "}}); got != "line one\nline two" {
+		t.Errorf("lone text = %q", got)
+	}
+	same := []Question{{Header: "Q", Question: "First?"}, {Header: "Q", Question: "Second?"}}
+	if got := FormatAnswers(same, []Answer{{Other: "a"}, {Other: "b"}}); got != "First?: a\nSecond?: b" {
+		t.Errorf("shared headers = %q", got)
+	}
+}
+
 func TestChoices(t *testing.T) {
 	qs := []Question{
 		{Question: "One", Options: []Option{{Label: "A"}, {Label: "B"}}},

@@ -65,18 +65,34 @@ const (
 	TriageReopen  = "reopen"
 )
 
-// QueueOption is one choice of an AskUserQuestion question.
+// QueueOption is one choice of an AskUserQuestion question. Preview is
+// optional plain text (a mockup or snippet) shown with the option.
 type QueueOption struct {
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
+	Preview     string `json:"preview,omitempty"`
 }
 
-// QueueQuestion is one question of an AskUserQuestion call.
+// QueueQuestion is one question of an AskUserQuestion call. Input is the
+// control to draw for it: single_select (one option), multi_select (toggle
+// any number) or text (no options: a typed answer). AllowOther: free text
+// may replace a single_select's choice or be added to a multi_select's.
 type QueueQuestion struct {
 	Header      string        `json:"header,omitempty"`
 	Question    string        `json:"question"`
 	Options     []QueueOption `json:"options"`
 	MultiSelect bool          `json:"multi_select"`
+	Input       string        `json:"input"`
+	AllowOther  bool          `json:"allow_other"`
+}
+
+// QueueQuestionAnswer answers one question of a question entry
+// (QueueAnswerRequest.Answers): choice holds option labels (at most one
+// unless multi_select), other free text (a text question's answer, or the
+// "Other" of a question with allow_other; not with a single_select's choice).
+type QueueQuestionAnswer struct {
+	Choice []string `json:"choice,omitempty"`
+	Other  string   `json:"other,omitempty"`
 }
 
 // QueueEntry is one pending question for the user. Text fields come from
@@ -92,6 +108,10 @@ type QueueEntry struct {
 	Body         string `json:"body,omitempty"`
 	// CreatedAt is Unix milliseconds, when known.
 	CreatedAt int64 `json:"created_at,omitempty"`
+	// Input is how the entry is answered: questions (each of questions[]
+	// with its own control, answered with answers[]), decision (allow /
+	// deny) or text (answer).
+	Input string `json:"input"`
 	// Questions: kind question.
 	Questions []QueueQuestion `json:"questions,omitempty"`
 	// Tool, Action, RequestID, RuntimeGeneration: kind permission. Echo
@@ -187,18 +207,21 @@ type QueueWatchSnapshot struct {
 
 // QueueAnswerRequest is POST /direct/v1/queue/{entry_id}/answer. Per kind:
 //
-//   - question: answer (free text) or choice (option labels; only for an entry
-//     with exactly one question, several labels only when it is multi_select);
-//     runtime_generation is accepted and ignored;
+//   - question: answers (one QueueQuestionAnswer per question, in order: the
+//     form for every question shape), or the older answer (free text) or
+//     choice (option labels; only for an entry with exactly one question,
+//     several labels only when it is multi_select) — exactly one of the
+//     three; runtime_generation is accepted and ignored;
 //   - permission: decision (allow | deny) and runtime_generation (the entry's,
 //     unchanged);
 //   - goal_input, decision_needed: answer.
 type QueueAnswerRequest struct {
-	IdemKey           string   `json:"idem_key"`
-	Answer            string   `json:"answer,omitempty"`
-	Choice            []string `json:"choice,omitempty"`
-	Decision          string   `json:"decision,omitempty"`
-	RuntimeGeneration string   `json:"runtime_generation,omitempty"`
+	IdemKey           string                `json:"idem_key"`
+	Answer            string                `json:"answer,omitempty"`
+	Choice            []string              `json:"choice,omitempty"`
+	Answers           []QueueQuestionAnswer `json:"answers,omitempty"`
+	Decision          string                `json:"decision,omitempty"`
+	RuntimeGeneration string                `json:"runtime_generation,omitempty"`
 }
 
 // ItemStateRequest is POST /direct/v1/items/{item_id}/state.
@@ -343,11 +366,14 @@ func projectEntry(e queue.Entry) QueueEntry {
 		Workgroup: e.Workgroup, Title: e.Title, Body: e.Body, CreatedAt: e.Created,
 		Tool: e.Tool, Action: e.Action, RequestID: e.RequestID, RuntimeGeneration: e.RuntimeGeneration,
 		ItemID: e.Item, SuggestedAction: e.Suggest, PRs: e.PRs, Links: e.Links,
+		Input: queue.EntryInput(e.Kind),
 	}
 	for _, q := range e.Questions {
-		qq := QueueQuestion{Header: q.Header, Question: q.Question, MultiSelect: q.MultiSelect, Options: []QueueOption{}}
+		q = q.Normalize()
+		qq := QueueQuestion{Header: q.Header, Question: q.Question, MultiSelect: q.MultiSelect,
+			Input: q.Input, AllowOther: q.AllowOther, Options: []QueueOption{}}
 		for _, o := range q.Options {
-			qq.Options = append(qq.Options, QueueOption{Label: o.Label, Description: o.Description})
+			qq.Options = append(qq.Options, QueueOption{Label: o.Label, Description: o.Description, Preview: o.Preview})
 		}
 		out.Questions = append(out.Questions, qq)
 	}
@@ -547,10 +573,44 @@ func readStrict(w http.ResponseWriter, r *http.Request, body []byte, v any, key 
 func answerFields(kind string, req QueueAnswerRequest, e *queue.Entry) (map[string]string, error) {
 	bad := errors.New("invalid answer fields for " + kind)
 	text := strings.TrimSpace(req.Answer)
-	if len(req.Answer) > MaxPromptBytes || len(req.RuntimeGeneration) > MaxFieldBytes || len(req.Choice) > 32 {
+	if len(req.Answer) > MaxPromptBytes || len(req.RuntimeGeneration) > MaxFieldBytes || len(req.Choice) > 32 || len(req.Answers) > queue.MaxAnswers {
 		return nil, bad
 	}
 	f := map[string]string{}
+	if len(req.Answers) > 0 {
+		if kind != queue.KindQuestion || text != "" || len(req.Choice) > 0 || req.Decision != "" {
+			return nil, bad
+		}
+		as := make([]queue.Answer, len(req.Answers))
+		size := 0
+		for i, a := range req.Answers {
+			if len(a.Choice) > 32 {
+				return nil, bad
+			}
+			for _, c := range a.Choice {
+				if c == "" || len(c) > MaxFieldBytes || strings.ContainsAny(c, "\n\r") {
+					return nil, bad
+				}
+				size += len(c)
+			}
+			size += len(a.Other)
+			as[i] = queue.Answer{Choice: a.Choice, Other: a.Other}
+		}
+		if size > MaxPromptBytes {
+			return nil, bad
+		}
+		if e != nil {
+			if err := queue.ValidateAnswers(e.Questions, as); err != nil {
+				return nil, errors.New("invalid answer fields for " + kind + ": " + err.Error())
+			}
+		}
+		raw, err := json.Marshal(as)
+		if err != nil {
+			return nil, bad
+		}
+		f[core.QueueAnswersField] = string(raw)
+		return f, nil
+	}
 	switch kind {
 	case queue.KindPermission:
 		if text != "" || len(req.Choice) > 0 || (req.Decision != core.SteerAllow && req.Decision != core.SteerDeny) || req.RuntimeGeneration == "" {
@@ -625,7 +685,13 @@ func (s *Server) answerRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text := req.Answer
-	if len(req.Choice) > 0 {
+	if len(req.Answers) > 0 {
+		parts := make([]string, 0, len(req.Answers))
+		for _, a := range req.Answers {
+			parts = append(parts, strings.Join(append(append([]string(nil), a.Choice...), a.Other), ", "))
+		}
+		text = strings.Join(parts, " | ")
+	} else if len(req.Choice) > 0 {
 		text = strings.Join(req.Choice, ", ")
 	} else if req.Decision != "" {
 		text = req.Decision

@@ -148,13 +148,18 @@ done).`,
 					{Name: "all", Short: "a", Usage: "also list entries you dismissed"},
 					{Name: "json", Short: "j", Usage: "print as JSON"},
 				}},
-			{Name: "answer", Aliases: []string{"reply"}, Args: "<entry> [<text>...] [--choice <label>]... [--allow | --deny]",
+			{Name: "answer", Aliases: []string{"reply"}, Args: "<entry> [<text>...] [--choice <label>]... [--answers <json>] [--allow | --deny]",
 				Summary: "answer one entry; amux re-checks it is still open and delivers it",
-				Detail: `A question takes --choice <label> (repeat per question, "a|b" for a
-multi-select) or free text; a permission request takes --allow or --deny; a
-goal ask or decision item takes text.`,
+				Detail: `With only the entry id, in a terminal, amux shows the whole question and
+asks for each answer: an option number (or your own text) for a single choice,
+several numbers for a multi-select, a line for a text question.
+Otherwise a question takes --choice <label> (repeat per question, "a|b" for a
+multi-select), free text, or --answers with one {"choice":[labels],"other":"text"}
+per question; a permission request takes --allow or --deny; a goal ask or
+decision item takes text.`,
 				Flags: []flagSpec{
 					{Name: "choice", Short: "c", Arg: "<label>", Repeat: true, Usage: "the option label to pick"},
+					{Name: "answers", Arg: "<json>", Usage: "per-question answers: [{\"choice\":[...],\"other\":\"...\"},...]"},
 					{Name: "text", Short: "m", Arg: "<text>", Usage: "free-text answer (or give the words as operands)"},
 					{Name: "allow", Usage: "allow a permission request"},
 					{Name: "deny", Usage: "deny a permission request"},
@@ -314,6 +319,7 @@ func doActionSpecs() map[string]*cmdSpec {
 				{Name: core.QueueEntryField, Arg: "<id>", Required: true, Usage: "the queue entry"},
 				{Name: core.QueueTextField, Arg: "<text>", Usage: "free-text answer"},
 				{Name: core.QueueChoiceField, Arg: "<label>", Usage: "option label(s), one line per question"},
+				{Name: core.QueueAnswersField, Arg: "<json>", Usage: "per-question answers: [{\"choice\":[labels],\"other\":\"text\"}]"},
 				{Name: core.SteerDecision, Arg: "allow|deny", Usage: "a permission request's answer"},
 			}},
 		core.ActionQueueDismiss: {Summary: "hide a question-queue entry (host only; amux inbox dismiss)",

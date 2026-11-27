@@ -70,14 +70,14 @@ func TestQueuePanel(t *testing.T) {
 		t.Errorf("question options not shown:\n%s", out)
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
-	if m.form == nil || m.form.action != core.ActionQueueAnswer {
-		t.Fatalf("r opened %+v", m.form)
+	if m.qp.answer == nil || m.qp.answer.entry.ID != "q-1" {
+		t.Fatalf("r opened %+v", m.qp.answer)
 	}
-	m.form.fields[0].value = "pg, please"
-	if f := formFieldsForSubmit(m.form); f[core.QueueEntryField] != "q-1" || f[core.QueueTextField] != "pg, please" {
-		t.Fatalf("reply fields = %v", f)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	if f, err := m.qp.answer.fields(); err != nil || f[core.QueueAnswersField] != `[{"choice":["pg"]}]` {
+		t.Fatalf("answer fields = %v, %v", f, err)
 	}
-	m.form = nil
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc}) // back to the list
 
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if m.qp.open {

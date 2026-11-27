@@ -10,6 +10,7 @@
       "workgroup": "wg1",
       "title": "permission: Bash",
       "body": "rm -rf build/",
+      "input": "decision",
       "tool": "Bash",
       "action": "rm -rf build/",
       "request_id": "toolu_01",
@@ -23,6 +24,7 @@
       "session_title": "api work",
       "workgroup": "wg1",
       "title": "Which database?",
+      "input": "questions",
       "questions": [
         {
           "header": "Database",
@@ -33,10 +35,13 @@
               "description": "embedded"
             },
             {
-              "label": "postgres"
+              "label": "postgres",
+              "preview": "DATABASE_URL=postgres://..."
             }
           ],
-          "multi_select": false
+          "multi_select": false,
+          "input": "single_select",
+          "allow_other": true
         }
       ]
     },
@@ -48,6 +53,7 @@
       "session_title": "api work",
       "workgroup": "wg1",
       "title": "Scope? (+1 more)",
+      "input": "questions",
       "questions": [
         {
           "header": "Scope",
@@ -60,7 +66,9 @@
               "label": "web"
             }
           ],
-          "multi_select": true
+          "multi_select": true,
+          "input": "multi_select",
+          "allow_other": true
         },
         {
           "header": "Ship",
@@ -73,7 +81,9 @@
               "label": "no"
             }
           ],
-          "multi_select": false
+          "multi_select": false,
+          "input": "single_select",
+          "allow_other": true
         }
       ]
     },
@@ -86,7 +96,8 @@
       "workgroup": "wg1",
       "title": "Which region?",
       "body": "Which region should the rollout start in?",
-      "created_at": 1795400000000
+      "created_at": 1795400000000,
+      "input": "text"
     },
     {
       "id": "d-eeeeeeeeee",
@@ -97,6 +108,7 @@
       "title": "Rewrite billing?",
       "body": "The old billing module blocks the migration.",
       "created_at": 1795300000000,
+      "input": "text",
       "item_id": "it-0000000a",
       "suggested_action": "new workgroup for the rewrite",
       "prs": [
@@ -109,7 +121,8 @@
       "state": "open",
       "session_id": "wg3",
       "workgroup": "wg3",
-      "title": "Docs tone?"
+      "title": "Docs tone?",
+      "input": "text"
     }
   ],
   "items": [

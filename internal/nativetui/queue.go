@@ -41,6 +41,8 @@ type queuePanel struct {
 	// scroll is the desired first body row; rendering clamps it so the
 	// selected entry stays in view at the current width.
 	scroll int
+	// answer is the open answer view (answer.go), drawn over the list.
+	answer *answerState
 }
 
 func (q *queuePanel) interval() time.Duration {
@@ -102,7 +104,7 @@ func (m *model) applyQueue(d *core.Data) {
 }
 
 func (m *model) toggleQueue() tea.Cmd {
-	m.qp.open = !m.qp.open
+	m.qp.open, m.qp.answer = !m.qp.open, nil
 	if m.qp.open {
 		return m.refreshQueue()
 	}
@@ -126,6 +128,9 @@ func (m *model) queueAnswer(e queue.Entry, fields map[string]string) tea.Cmd {
 
 func (m *model) handleQueueKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	q := &m.qp
+	if q.answer != nil {
+		return m.handleAnswerKey(k)
+	}
 	n := 0
 	if q.ov != nil {
 		n = len(q.ov.Entries)
@@ -164,7 +169,7 @@ func (m *model) handleQueueKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "r", "enter":
 		if has && e.Kind != queue.KindPermission {
-			m.openQueueReplyForm(e)
+			m.openAnswer(e)
 		}
 	case "d":
 		if has {
@@ -180,34 +185,6 @@ func (m *model) handleQueueKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
-}
-
-// openQueueReplyForm opens a one-field form that answers an entry with text.
-func (m *model) openQueueReplyForm(e queue.Entry) {
-	m.form = &formState{
-		title:  "Answer · " + truncate(e.Title, 60),
-		action: core.ActionQueueAnswer,
-		submit: "Send answer",
-		extra:  map[string]string{core.QueueEntryField: e.ID},
-		fields: []*formField{{key: core.QueueTextField, label: "Answer"}},
-	}
-	m.form.context = queueReplyContext(e)
-}
-
-// queueReplyContext is the text a reply answers: each question (with its
-// header chip and numbered options), else the entry's body or title.
-func queueReplyContext(e queue.Entry) string {
-	if e.Kind != queue.KindQuestion || len(e.Questions) == 0 {
-		return firstNonEmptyText(e.Body, e.Title)
-	}
-	var b strings.Builder
-	for _, q := range e.Questions {
-		b.WriteString(headerChip(q.Header) + cleanText(q.Question) + "\n")
-		for i, o := range q.Options {
-			fmt.Fprintf(&b, "%d. %s\n", i+1, flat(o.Label))
-		}
-	}
-	return b.String()
 }
 
 func firstNonEmptyText(s ...string) string {
@@ -245,6 +222,9 @@ func pluralWord(n int, one, many string) string {
 
 // renderQueue draws the panel into the main pane.
 func (m *model) renderQueue() string {
+	if m.qp.answer != nil {
+		return m.renderAnswer()
+	}
 	w, h := m.mainWidth(), m.paneRows()
 	lines := m.queueLines(w, h)
 	return lipgloss.NewStyle().Width(w).Height(h).MaxHeight(h).Render(strings.Join(lines, "\n"))
@@ -420,10 +400,10 @@ func queueEntryLines(e queue.Entry, selected bool, w int) []string {
 		for _, qq := range e.Questions {
 			out = append(out, hang("    ", headerChip(qq.Header)+cleanText(qq.Question), w, nil, false)...)
 			for oi, o := range qq.Options {
-				out = append(out, optionLines(questionOption{Number: oi + 1, Label: o.Label, Description: o.Description}, 6, w, false)...)
+				out = append(out, optionLines(questionOption{Number: oi + 1, Label: o.Label, Description: o.Description, Preview: o.Preview}, 6, w, false)...)
 			}
 		}
-		k := keyStyle.Render("r") + dim(" reply  ") + keyStyle.Render("d") + dim(" hide")
+		k := keyStyle.Render("Enter") + dim(" answer  ") + keyStyle.Render("d") + dim(" hide")
 		if len(e.Questions) == 1 && !e.Questions[0].MultiSelect && len(e.Questions[0].Options) > 0 {
 			k = keyStyle.Render("1-9") + dim(" choose  ") + k
 		}
@@ -432,7 +412,7 @@ func queueEntryLines(e queue.Entry, selected bool, w int) []string {
 		if e.Body != "" && e.Body != e.Title {
 			out = append(out, hang("    ", e.Body, w, dim, false)...)
 		}
-		out = append(out, keys(keyStyle.Render("r")+dim(" reply  ")+keyStyle.Render("d")+dim(" hide"))...)
+		out = append(out, keys(keyStyle.Render("Enter")+dim(" answer  ")+keyStyle.Render("d")+dim(" hide"))...)
 	case queue.KindDecision:
 		if e.Body != "" {
 			out = append(out, hang("    ", e.Body, w, dim, false)...)
@@ -440,7 +420,7 @@ func queueEntryLines(e queue.Entry, selected bool, w int) []string {
 		if e.Suggest != "" {
 			out = append(out, hang(dim("    suggested: "), e.Suggest, w, dim, true)...)
 		}
-		out = append(out, keys(keyStyle.Render("r")+dim(" answer  ")+keyStyle.Render("a")+dim(" acknowledge  ")+keyStyle.Render("d")+dim(" dismiss"))...)
+		out = append(out, keys(keyStyle.Render("Enter")+dim(" answer  ")+keyStyle.Render("a")+dim(" acknowledge  ")+keyStyle.Render("d")+dim(" dismiss"))...)
 	}
 	return append(out, "")
 }

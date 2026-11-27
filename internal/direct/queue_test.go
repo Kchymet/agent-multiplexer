@@ -11,6 +11,7 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/items"
+	"amux/internal/queue"
 )
 
 func wgScope(ids ...string) ResourceScope {
@@ -61,6 +62,19 @@ func TestQueueIsProjectedToTheGrant(t *testing.T) {
 	}
 	if r.ServerID != a.ServerID() || r.Entries[0].State != EntryStateOpen || r.Entries[0].RuntimeGeneration != "gen-7" {
 		t.Errorf("entry shape = %+v", r.Entries[0])
+	}
+	// Each entry and question says which control answers it.
+	inputs := map[string]string{}
+	for _, e := range r.Entries {
+		inputs[e.ID] = e.Input
+	}
+	if inputs[qPermission] != queue.InputDecision || inputs[qMulti] != queue.InputQuestions || inputs[qGoal] != queue.InputText || inputs[qDecision] != queue.InputText {
+		t.Errorf("entry inputs = %v", inputs)
+	}
+	multi := r.Entries[slices.IndexFunc(r.Entries, func(e QueueEntry) bool { return e.ID == qMulti })]
+	if len(multi.Questions) != 2 || multi.Questions[0].Input != queue.InputMultiSelect || !multi.Questions[0].AllowOther ||
+		multi.Questions[1].Input != queue.InputSingleSelect {
+		t.Errorf("multi questions = %+v", multi.Questions)
 	}
 
 	wg := enroll(t, a, []string{PermRead}, wgScope("wg1"))
@@ -174,6 +188,32 @@ func TestQueueAnswerPermissionsAndFields(t *testing.T) {
 	if act := <-q.applied; act.Fields[core.QueueTextField] != "Scope: api, web\nShip: yes" {
 		t.Errorf("text action = %+v", act)
 	}
+	// answers: one control per question, Other text alongside choices.
+	for name, body := range map[string]QueueAnswerRequest{
+		"answers with answer":     {IdemKey: "a1", Answers: []QueueQuestionAnswer{{Choice: []string{"api"}}}, Answer: "x"},
+		"answers with choice":     {IdemKey: "a2", Answers: []QueueQuestionAnswer{{Choice: []string{"api"}}}, Choice: []string{"api"}},
+		"unknown label":           {IdemKey: "a3", Answers: []QueueQuestionAnswer{{Choice: []string{"cli"}}}},
+		"too many answers":        {IdemKey: "a4", Answers: []QueueQuestionAnswer{{Other: "a"}, {Other: "b"}, {Other: "c"}}},
+		"single choice and other": {IdemKey: "a5", Answers: []QueueQuestionAnswer{{}, {Choice: []string{"yes"}, Other: "later"}}},
+		"nothing answered":        {IdemKey: "a6", Answers: []QueueQuestionAnswer{{}, {}}},
+	} {
+		if w := do(s, "POST", path(qMulti), steer.AccessToken, answer(body)); w.Code != 400 {
+			t.Errorf("%s: %d %s", name, w.Code, w.Body)
+		}
+	}
+	if w := do(s, "POST", path(qGoal), steer.AccessToken, answer(QueueAnswerRequest{IdemKey: "a7", Answers: []QueueQuestionAnswer{{Other: "x"}}})); w.Code != 400 {
+		t.Errorf("answers on a goal entry: %d", w.Code)
+	}
+	w = do(s, "POST", path(qMulti), steer.AccessToken, answer(QueueAnswerRequest{IdemKey: "ok4", Answers: []QueueQuestionAnswer{
+		{Choice: []string{"web", "api"}, Other: "docs"}, {Other: "after review"},
+	}}))
+	if w.Code != 200 {
+		t.Fatalf("answers: %d %s", w.Code, w.Body)
+	}
+	if act := <-q.applied; act.Fields[core.QueueAnswersField] != `[{"choice":["web","api"],"other":"docs"},{"other":"after review"}]` || act.Fields[core.QueueTextField] != "" {
+		t.Errorf("answers action = %+v", act)
+	}
+
 	// Replaying a key answers the recorded result without re-running it.
 	n := q.applies.Load()
 	if w := do(s, "POST", path(qMulti), steer.AccessToken, answer(QueueAnswerRequest{IdemKey: "ok3", Answer: "Scope: api, web\nShip: yes"})); w.Code != 200 || q.applies.Load() != n {

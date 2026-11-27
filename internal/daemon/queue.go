@@ -335,6 +335,9 @@ func (d *Daemon) deriveQueue(src queueSources) (entries []queue.Entry, inbox que
 			PRs: it.PRs, Links: it.Links, Created: it.Created,
 		})
 	}
+	for i := range entries {
+		entries[i].Input = queue.EntryInput(entries[i].Kind)
+	}
 	return entries, inbox, rows, errs
 }
 
@@ -420,6 +423,16 @@ func (d *Daemon) answerQueueEntry(ctx context.Context, e queue.Entry, f map[stri
 			core.SteerRequestID: e.RequestID, access.RuntimeGenerationField: e.RuntimeGeneration,
 		}})
 	case queue.KindQuestion:
+		if raw := f[core.QueueAnswersField]; raw != "" {
+			if f[core.QueueChoiceField] != "" || text != "" {
+				return fail("%s replaces %s and %s: send one form", core.QueueAnswersField, core.QueueChoiceField, core.QueueTextField)
+			}
+			reply, err := queueAnswersReply(e.Questions, raw)
+			if err != nil {
+				return fail("%v", err)
+			}
+			return d.queuePrompt(ctx, e.Session, reply)
+		}
 		choices := queue.ParseChoices(f[core.QueueChoiceField])
 		if !queue.ValidChoices(e.Questions, choices) {
 			return fail("choice must name the question's option labels, one line per question (| between labels of a multi-select)")
@@ -453,6 +466,19 @@ func (d *Daemon) answerQueueEntry(ctx context.Context, e queue.Entry, f map[stri
 		return ok()
 	}
 	return fail("unknown queue entry kind %q", e.Kind)
+}
+
+// queueAnswersReply decodes and validates a QueueAnswersField value against
+// the entry's questions and formats the reply typed to the session.
+func queueAnswersReply(qs []queue.Question, raw string) (string, error) {
+	var as []queue.Answer
+	if err := json.Unmarshal([]byte(raw), &as); err != nil {
+		return "", fmt.Errorf("%s must be a JSON array of {\"choice\":[labels],\"other\":\"text\"}: %v", core.QueueAnswersField, err)
+	}
+	if err := queue.ValidateAnswers(qs, as); err != nil {
+		return "", err
+	}
+	return queue.FormatAnswers(qs, as), nil
 }
 
 // queuePrompt delivers text to a session as the user's own prompt. A prompt

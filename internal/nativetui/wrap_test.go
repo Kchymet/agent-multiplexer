@@ -243,33 +243,33 @@ func TestQueueRewrapsOnResize(t *testing.T) {
 	}
 }
 
-// TestQueueReplyFormShowsQuestion: the reply form, which covers the queue,
-// shows the question it answers wrapped inside the box, capped so the box
-// still fits the pane, and its title is the only line cut with an ellipsis.
-func TestQueueReplyFormShowsQuestion(t *testing.T) {
+// TestQueueReplyShowsWholeQuestion: r opens the answer view over the queue,
+// and it shows the whole question wrapped — never capped — in any pane: a
+// short pane scrolls instead of cutting it.
+func TestQueueReplyShowsWholeQuestion(t *testing.T) {
 	m := resourcesModel()
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	m.Update(queueFrame(t, wrapOverview()))
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
-	if m.form == nil {
-		t.Fatal("r did not open the reply form")
+	if m.qp.answer == nil {
+		t.Fatal("r did not open the answer view")
 	}
-	out := m.renderForm()
+	out := m.renderQueue()
 	lines := strings.Split(out, "\n")
 	assertFits(t, lines, m.mainWidth())
 	if len(lines) > m.paneRows() {
-		t.Errorf("form is %d rows in a %d-row pane", len(lines), m.paneRows())
+		t.Errorf("view is %d rows in a %d-row pane", len(lines), m.paneRows())
 	}
-	joined := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(out), "│", " ")), " ")
-	for _, want := range []string{"[Layout] Should the settings page use tabs", "Answer:"} {
+	joined := strings.Join(strings.Fields(ansi.Strip(out)), " ")
+	for _, want := range []string{"[Layout] Should the settings page use tabs", "change one setting per visit.", "Other:"} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("reply form missing %q:\n%s", want, ansi.Strip(out))
+			t.Errorf("answer view missing %q:\n%s", want, ansi.Strip(out))
 		}
 	}
-	// A short pane drops the context before the answer field.
-	m.Update(tea.WindowSizeMsg{Width: 100, Height: 12})
-	if lines := strings.Split(m.renderForm(), "\n"); len(lines) > m.paneRows() || !strings.Contains(ansi.Strip(m.renderForm()), "Answer:") {
-		t.Errorf("short pane form:\n%s", ansi.Strip(m.renderForm()))
+	// A short pane scrolls; the focused control stays in view.
+	m.Update(tea.WindowSizeMsg{Width: 70, Height: 8})
+	if lines := strings.Split(m.renderQueue(), "\n"); len(lines) > m.paneRows() || !strings.Contains(ansi.Strip(m.renderQueue()), "▸") {
+		t.Errorf("short pane view:\n%s", ansi.Strip(m.renderQueue()))
 	}
 }

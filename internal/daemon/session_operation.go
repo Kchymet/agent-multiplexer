@@ -114,7 +114,7 @@ func validateSessionAction(req access.Request) error {
 		return validateItemAction(req)
 	case core.ActionQueueAnswer, core.ActionQueueDismiss:
 		// Recognized so policy answers access denied: only the host answers.
-		return joinValidation(noID(), noTarget(), fields(core.QueueEntryField, core.QueueTextField, core.QueueChoiceField, core.SteerDecision))
+		return joinValidation(noID(), noTarget(), fields(core.QueueEntryField, core.QueueTextField, core.QueueChoiceField, core.QueueAnswersField, core.SteerDecision))
 	case core.ActionRefresh:
 		return joinValidation(noID(), noTarget(), fields())
 	case core.ActionStart:

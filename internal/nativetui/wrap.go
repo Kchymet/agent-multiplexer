@@ -187,7 +187,7 @@ func hang(prefix, text string, width int, style func(string) string, flatten boo
 
 // questionOption is one option row as the question views draw it. Mark is an
 // optional selection glyph drawn before the number ("[ ]"/"[✔]" for
-// multi-select in the coming form view, docs/question-prompts.md §5); Preview
+// multi-select in the answer view, docs/question-prompts.md §4); Preview
 // is plain text shown under the option (the TUI shows previews as text).
 type questionOption struct {
 	Number      int

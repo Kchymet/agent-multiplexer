@@ -140,6 +140,18 @@ func TestQueueDismissAndStaleAnswers(t *testing.T) {
 	if res.OK {
 		t.Fatal("an unknown choice was accepted")
 	}
+	// So are per-question answers that do not fit the question, or that come
+	// with the older fields.
+	for _, f := range []map[string]string{
+		{core.QueueAnswersField: `[{"choice":["Z"]}]`},
+		{core.QueueAnswersField: `{"choice":["A"]}`},
+		{core.QueueAnswersField: `[{"choice":["A"]}]`, core.QueueTextField: "x"},
+	} {
+		f[core.QueueEntryField] = id
+		if res := d.handle(ctx, core.Action{Action: core.ActionQueueAnswer, Fields: f}); res.OK {
+			t.Fatalf("answers %v accepted", f)
+		}
+	}
 
 	// Dismissing hides a live question until it changes; --all still lists it.
 	if res := d.handle(ctx, core.Action{Action: core.ActionQueueDismiss, Fields: map[string]string{core.QueueEntryField: id}}); !res.OK {
@@ -221,5 +233,19 @@ func TestHostAcknowledgedResolver(t *testing.T) {
 		if err != nil || got != want {
 			t.Errorf("HostAcknowledged(%q) = %v, %v; want %v", id, got, err, want)
 		}
+	}
+}
+
+func TestQueueAnswersReply(t *testing.T) {
+	qs := []queue.Question{
+		{Header: "Scope", Question: "Which?", Options: []queue.Option{{Label: "api"}, {Label: "web"}}, MultiSelect: true},
+		{Header: "Ship", Question: "Ship?", Options: []queue.Option{{Label: "yes"}, {Label: "no"}}},
+	}
+	got, err := queueAnswersReply(qs, `[{"choice":["web","api"],"other":"docs"},{"other":"next week"}]`)
+	if err != nil || got != "Scope: api, web, docs\nShip: next week" {
+		t.Fatalf("reply = %q, %v", got, err)
+	}
+	if _, err := queueAnswersReply(qs, `[{"choice":["yes"]}]`); err == nil {
+		t.Fatal("a label of another question accepted")
 	}
 }

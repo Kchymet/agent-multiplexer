@@ -674,8 +674,10 @@ func (m *model) renderHelp() string {
 		return ansi.Truncate(hints("pull requests", []hint{{upDownKeys(), "move"}, {"Enter/o", "open in browser"}, {"p/Esc", "close"}}), m.w, "")
 	case m.res.open:
 		return ansi.Truncate(hints("resources", []hint{{"s", "sort CPU/mem"}, {upDownKeys(), "scroll"}, {"t/Esc", "close"}}), m.w, "")
+	case m.qp.open && m.qp.answer != nil:
+		return ansi.Truncate(hints("answer", m.answerHints()), m.w, "")
 	case m.qp.open:
-		return ansi.Truncate(hints("questions", []hint{{upDownKeys(), "select"}, {"y/n", "allow/deny"}, {"1-9", "choose"}, {"PgUp/PgDn", "scroll"}, {"r", "reply"}, {"a", "ack item"}, {"d", "hide"}, {"i/Esc", "close"}}), m.w, "")
+		return ansi.Truncate(hints("questions", []hint{{upDownKeys(), "select"}, {"y/n", "allow/deny"}, {"1-9", "choose"}, {"PgUp/PgDn", "scroll"}, {"Enter", "answer"}, {"a", "ack item"}, {"d", "hide"}, {"i/Esc", "close"}}), m.w, "")
 	case m.status != "":
 		return dimStyle.Render(truncate(m.status, m.w))
 	case m.focus == focusAgent:

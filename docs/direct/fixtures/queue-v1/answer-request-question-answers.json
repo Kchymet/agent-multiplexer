@@ -1,0 +1,17 @@
+{
+  "idem_key": "3b0f7a8e-0007",
+  "answers": [
+    {
+      "choice": [
+        "api",
+        "web"
+      ],
+      "other": "docs too"
+    },
+    {
+      "choice": [
+        "yes"
+      ]
+    }
+  ]
+}

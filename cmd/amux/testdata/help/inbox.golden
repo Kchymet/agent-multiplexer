@@ -9,7 +9,7 @@ are the user's alone (host terminal).
 
 commands:
   ls [--all] [--json]  pending questions, global inbox counts and the workgroup summary (the default)
-  answer <entry> [<text>...] [--choice <label>]... [--allow | --deny]
+  answer <entry> [<text>...] [--choice <label>]... [--answers <json>] [--allow | --deny]
                        answer one entry; amux re-checks it is still open and delivers it
   dismiss <entry>      hide an entry (a live question is hidden until it changes)
   ack <item>           acknowledge a global-inbox item as the user (lets the overseer act on it)

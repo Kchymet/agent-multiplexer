@@ -102,7 +102,7 @@ func queueEntries() []queue.Entry {
 		{ID: qPermission, Kind: queue.KindPermission, Session: "a1", SessionTitle: "api work", Workgroup: "wg1",
 			Title: "permission: Bash", Body: "rm -rf build/", Tool: "Bash", Action: "rm -rf build/", RequestID: "toolu_01", RuntimeGeneration: "gen-7"},
 		{ID: qQuestion, Kind: queue.KindQuestion, Session: "a1", SessionTitle: "api work", Workgroup: "wg1", Title: "Which database?",
-			Questions: []queue.Question{{Header: "Database", Question: "Which database?", Options: []queue.Option{{Label: "sqlite", Description: "embedded"}, {Label: "postgres"}}}}},
+			Questions: []queue.Question{{Header: "Database", Question: "Which database?", Options: []queue.Option{{Label: "sqlite", Description: "embedded"}, {Label: "postgres", Preview: "DATABASE_URL=postgres://..."}}}}},
 		{ID: qMulti, Kind: queue.KindQuestion, Session: "a1", SessionTitle: "api work", Workgroup: "wg1", Title: "Scope? (+1 more)",
 			Questions: []queue.Question{
 				{Header: "Scope", Question: "Scope?", Options: []queue.Option{{Label: "api"}, {Label: "web"}}, MultiSelect: true},

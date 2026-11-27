@@ -4,5 +4,5 @@
     one but leaves the double-charge race open.
     See https://github.com/Kchymet/agent-multiplexer/blob/master/internal/nativetui/queue.go#L280-L320?plain=1
     suggested: ship the patch now, start the rewrite in a new workgroup after launch
-    r answer  a acknowledge  d dismiss
+    Enter answer  a acknowledge  d dismiss
 

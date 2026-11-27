@@ -21,6 +21,8 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,18 +42,85 @@ const (
 // Kinds lists the entry kinds in display order.
 func Kinds() []string { return []string{KindPermission, KindQuestion, KindGoalInput, KindDecision} }
 
-// Option is one AskUserQuestion choice.
+// Input kinds: the control a client draws to answer a question or an entry
+// (docs/question-prompts.md).
+const (
+	// InputSingleSelect picks exactly one option, or types Other text
+	// instead when the question allows it.
+	InputSingleSelect = "single_select"
+	// InputMultiSelect toggles any number of options (plus optional Other
+	// text), then submits.
+	InputMultiSelect = "multi_select"
+	// InputText is a typed answer: a question with no options, a goal ask or
+	// a decision item.
+	InputText = "text"
+	// InputQuestions (an entry's input) answers each of the entry's
+	// questions with its own control.
+	InputQuestions = "questions"
+	// InputDecision (an entry's input) is a permission's allow / deny.
+	InputDecision = "decision"
+)
+
+// EntryInput is the control an entry of kind is answered with.
+func EntryInput(kind string) string {
+	switch kind {
+	case KindQuestion:
+		return InputQuestions
+	case KindPermission:
+		return InputDecision
+	}
+	return InputText
+}
+
+// Option is one AskUserQuestion choice. Preview is optional plain text (a
+// mockup or snippet) shown with the option.
 type Option struct {
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
+	Preview     string `json:"preview,omitempty"`
 }
 
-// Question is one AskUserQuestion question (a call may ask several).
+// Question is one AskUserQuestion question (a call may ask several). Input
+// and AllowOther are derived (Normalize, run by ParseQuestions) so every
+// client draws the same control: Input is single_select, multi_select or
+// text; AllowOther says free "Other" text may stand in for the choice of a
+// single_select or be added to a multi_select's — Claude Code's selector
+// always offers it.
 type Question struct {
 	Header      string   `json:"header,omitempty"`
 	Question    string   `json:"question"`
 	Options     []Option `json:"options,omitempty"`
 	MultiSelect bool     `json:"multiSelect,omitempty"`
+	Input       string   `json:"input,omitempty"`
+	AllowOther  bool     `json:"allowOther,omitempty"`
+}
+
+// Normalize trims the question, drops options without a label (and repeated
+// labels, which no answer could tell apart) and derives Input and
+// AllowOther.
+func (q Question) Normalize() Question {
+	q.Question = strings.TrimSpace(q.Question)
+	q.Header = strings.TrimSpace(q.Header)
+	var opts []Option
+	seen := map[string]bool{}
+	for _, o := range q.Options {
+		o.Label = strings.TrimSpace(o.Label)
+		if o.Label == "" || seen[o.Label] {
+			continue
+		}
+		seen[o.Label] = true
+		opts = append(opts, o)
+	}
+	q.Options = opts
+	switch {
+	case len(opts) == 0:
+		q.Input, q.MultiSelect, q.AllowOther = InputText, false, false
+	case q.MultiSelect:
+		q.Input, q.AllowOther = InputMultiSelect, true
+	default:
+		q.Input, q.AllowOther = InputSingleSelect, true
+	}
+	return q
 }
 
 // Entry is one pending question for the user.
@@ -67,6 +136,9 @@ type Entry struct {
 	// render as plain text).
 	Title string `json:"title"`
 	Body  string `json:"body,omitempty"`
+	// Input is the control the entry is answered with (EntryInput):
+	// questions (each question its own control), decision or text.
+	Input string `json:"input,omitempty"`
 	// Questions are an AskUserQuestion's questions and options.
 	Questions []Question `json:"questions,omitempty"`
 	// Tool and Action describe a permission request; RequestID and
@@ -127,11 +199,130 @@ func ParseQuestions(raw json.RawMessage) ([]Question, bool) {
 	}
 	out := in.Questions[:0]
 	for _, q := range in.Questions {
-		if strings.TrimSpace(q.Question) != "" {
+		if q = q.Normalize(); q.Question != "" {
 			out = append(out, q)
 		}
 	}
 	return out, len(out) > 0
+}
+
+// Answer is the answer to one question: the chosen option labels (one for a
+// single_select, any number for a multi_select) and/or Other, typed text (a
+// text question's answer, or the "Other" of a select that allows it). A
+// single_select takes a choice or Other text, not both.
+type Answer struct {
+	Choice []string `json:"choice,omitempty"`
+	Other  string   `json:"other,omitempty"`
+}
+
+// Empty reports an answer that answers nothing.
+func (a Answer) Empty() bool { return len(a.Choice) == 0 && strings.TrimSpace(a.Other) == "" }
+
+// MaxAnswers bounds an answer list.
+const MaxAnswers = 32
+
+// ValidateAnswers checks answers — one per question, in the questions'
+// order; a missing or empty answer leaves its question unanswered — against
+// the questions' schema. At least one question must be answered.
+func ValidateAnswers(qs []Question, as []Answer) error {
+	if len(as) > len(qs) || len(as) > MaxAnswers {
+		return fmt.Errorf("%d answers for %d questions", len(as), len(qs))
+	}
+	answered := false
+	for i, a := range as {
+		if a.Empty() {
+			continue
+		}
+		answered = true
+		q := qs[i].Normalize()
+		name := fmt.Sprintf("question %d", i+1)
+		other := strings.TrimSpace(a.Other) != ""
+		switch {
+		case q.Input == InputText && len(a.Choice) > 0:
+			return fmt.Errorf("%s has no options: answer it with text", name)
+		case len(a.Choice) > 1 && q.Input != InputMultiSelect:
+			return fmt.Errorf("%s takes one choice", name)
+		case q.Input == InputSingleSelect && len(a.Choice) > 0 && other:
+			return fmt.Errorf("%s takes a choice or other text, not both", name)
+		case q.Input != InputText && other && !q.AllowOther:
+			return fmt.Errorf("%s does not take other text", name)
+		}
+		seen := map[string]bool{}
+		for _, c := range a.Choice {
+			if seen[c] {
+				return fmt.Errorf("%s: %q is chosen twice", name, c)
+			}
+			seen[c] = true
+			if !hasOption(q, c) {
+				return fmt.Errorf("%s has no option %q", name, c)
+			}
+		}
+	}
+	if !answered {
+		return errors.New("no question is answered")
+	}
+	return nil
+}
+
+func hasOption(q Question, label string) bool {
+	for _, o := range q.Options {
+		if o.Label == label {
+			return true
+		}
+	}
+	return false
+}
+
+// FormatAnswers renders validated per-question answers as the reply typed to
+// the asking session, in FormatAnswer's shape: a lone question is answered
+// with its value; several one per line as "header: value", keyed by the
+// question text when the header is missing or shared with another question. A
+// value is the chosen labels in option order, then any Other text, joined by
+// ", ".
+func FormatAnswers(qs []Question, as []Answer) string {
+	// one flattens Other text to one line when several answers share the
+	// reply, one per line.
+	value := func(q Question, a Answer, one bool) string {
+		var parts []string
+		for _, o := range q.Options { // option order, not click order
+			for _, c := range a.Choice {
+				if c == o.Label {
+					parts = append(parts, c)
+					break
+				}
+			}
+		}
+		o := strings.TrimSpace(a.Other)
+		if one {
+			o = strings.Join(strings.Fields(o), " ")
+		}
+		if o != "" {
+			parts = append(parts, o)
+		}
+		return strings.Join(parts, ", ")
+	}
+	if len(qs) <= 1 {
+		if len(qs) == 0 || len(as) == 0 {
+			return ""
+		}
+		return value(qs[0].Normalize(), as[0], false)
+	}
+	headers := map[string]int{}
+	for _, q := range qs {
+		headers[strings.TrimSpace(q.Header)]++
+	}
+	var lines []string
+	for i, q := range qs {
+		if i >= len(as) || as[i].Empty() {
+			continue
+		}
+		label := strings.TrimSpace(q.Header)
+		if label == "" || headers[label] > 1 {
+			label = strings.TrimSpace(q.Question)
+		}
+		lines = append(lines, label+": "+value(q.Normalize(), as[i], true))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // FormatAnswer renders a typed reply to an AskUserQuestion the way the phone's
