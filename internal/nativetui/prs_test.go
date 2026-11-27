@@ -149,6 +149,20 @@ func TestPRPanelAndOpen(t *testing.T) {
 	if len(opened) != 1 || !strings.Contains(m.status, "opened") {
 		t.Fatalf("o opened %v (status %q)", opened, m.status)
 	}
+	// Several open (the workgroup header): o shows the pick-list on the most
+	// demanding one instead of guessing; Enter opens it.
+	opened = nil
+	m.cursor = 0
+	m.openSelectedPR()
+	if len(opened) != 0 || !m.prPanel.open || m.prPanel.cursor != 1 || !strings.Contains(m.status, "2 open pull requests") {
+		t.Fatalf("o on a header: opened %v panel %+v status %q", opened, m.prPanel, m.status)
+	}
+	m.handlePRKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(opened) != 1 {
+		t.Fatalf("Enter in the pick-list opened %v", opened)
+	}
+	m.prPanel.open = false
+
 	m.sessions = append(m.sessions, core.Session{ID: "m3", Title: "c", RootID: "wg1"})
 	m.cursor = 3
 	m.togglePRs()

@@ -247,6 +247,27 @@ type Rollup struct {
 	Totals map[string]int `json:"totals"`
 	// Sources is each enrichment source's freshness. Spec v1.1.
 	Sources []EnrichmentSource `json:"sources"`
+	// PullRequests lists the members' open pull requests (drafts included,
+	// merged and closed left out), the most demanding first, so a consumer can
+	// link each one straight from the workgroup row. Absent when there are none
+	// or PR watching is off; older daemons never send it. Spec v1.2.
+	PullRequests []RollupPullRequest `json:"pull_requests,omitempty"`
+}
+
+// RollupPullRequest is one member's open pull request (Rollup.PullRequests):
+// enough to draw a chip and open the PR without the member row.
+type RollupPullRequest struct {
+	SessionID string `json:"session_id"` // the member session that owns it
+	Member    string `json:"member"`     // the member's compact label
+	ID        string `json:"id"`         // the enrichment id, owner/repo#n
+	Repo      string `json:"repo"`       // owner/repo
+	Number    int    `json:"number"`
+	Title     string `json:"title"`
+	URL       string `json:"url"`    // the PR on GitHub (may be empty)
+	State     string `json:"state"`  // a PRState* value: draft or open
+	Status    string `json:"status"` // its normalized Status.State
+	CI        string `json:"ci"`     // a CI* value
+	Label     string `json:"label"`  // the ready-made chip, e.g. "#245 ✗ CI"
 }
 
 // EnrichmentSource is one enrichment source's freshness (Rollup.Sources and
