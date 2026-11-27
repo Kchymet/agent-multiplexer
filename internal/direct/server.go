@@ -12,9 +12,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"slices"
@@ -35,7 +37,13 @@ type Config struct {
 	WatchPoll    time.Duration // inventory poll for watch; default 2s
 	Revalidate   time.Duration // stream scope revalidation; default 5s
 	Keepalive    time.Duration // SSE keepalive; default 15s
-	Logf         func(format string, args ...any)
+	// WatchPing is the watch socket's ping interval (default 20s); a peer
+	// that answers nothing for three intervals is closed as dead.
+	WatchPing time.Duration
+	// WatchHeartbeat is the longest a watch that asked for heartbeats goes
+	// without a frame (default 25s).
+	WatchHeartbeat time.Duration
+	Logf           func(format string, args ...any)
 	// Wake serves the direct wake routes; nil answers them wake_disabled.
 	Wake *WakeService
 	// Approvals bridges POST /direct/v1/enroll/cloud verifies to the provider
@@ -56,6 +64,30 @@ type Server struct {
 	limiterMu sync.Mutex
 	failures  map[string][]time.Time // per source address
 	jobs      *creationJobs          // async creations (creations.go)
+	tel       *connTel               // connection telemetry (conntel.go)
+	// closing is set when the listener starts shutting down, so a stream it
+	// ends says server_closed rather than client_closed.
+	closing atomic.Bool
+}
+
+// ConnStats reports the connection counters since this server started.
+func (s *Server) ConnStats() ConnStats {
+	st := s.tel.snapshot()
+	st.Refresh = s.cfg.Authority.RefreshStats()
+	return st
+}
+
+// beginShutdown marks the server as stopping (Serve calls it before
+// http.Server.Shutdown).
+func (s *Server) beginShutdown() { s.closing.Store(true) }
+
+// peerGone is why a stream whose request context ended stopped: the
+// listener shutting down, or the client going away.
+func (s *Server) peerGone() string {
+	if s.closing.Load() {
+		return FailServerClosed
+	}
+	return FailClientClosed
 }
 
 // NewServer validates the configuration and builds the handler.
@@ -78,10 +110,17 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.Keepalive <= 0 {
 		cfg.Keepalive = 15 * time.Second
 	}
+	if cfg.WatchPing <= 0 {
+		cfg.WatchPing = 20 * time.Second
+	}
+	if cfg.WatchHeartbeat <= 0 {
+		cfg.WatchHeartbeat = 25 * time.Second
+	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
-	s := &Server{cfg: cfg, hosts: map[string]string{}, origins: map[string]bool{}, failures: map[string][]time.Time{}, jobs: newCreationJobs()}
+	s := &Server{cfg: cfg, hosts: map[string]string{}, origins: map[string]bool{}, failures: map[string][]time.Time{}, jobs: newCreationJobs(),
+		tel: newConnTel(cfg.Now, cfg.Logf)}
 	for i, e := range cfg.Endpoints {
 		c, err := CanonicalOrigin(e, false)
 		if err != nil {
@@ -130,6 +169,14 @@ func NewServer(cfg Config) (*Server, error) {
 
 // ServeHTTP gates every request on Host and Origin before routing.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	att := s.tel.begin(r)
+	w = &telWriter{ResponseWriter: w, a: att}
+	r = r.WithContext(context.WithValue(r.Context(), attemptKey{}, att))
+	defer att.finish()
+	s.serveGated(w, r, att)
+}
+
+func (s *Server) serveGated(w http.ResponseWriter, r *http.Request, att *attempt) {
 	h := w.Header()
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Content-Type-Options", "nosniff")
@@ -158,7 +205,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	att.reach(PhaseHTTP, "")
 	s.mux.ServeHTTP(w, r)
+	att.setPattern(r.Pattern) // the mux sets it on the request it routed
 }
 
 // originAllowed reports whether origin is an exact allowed browser origin:
@@ -186,6 +235,12 @@ type endpointKey struct{}
 func endpointOf(r *http.Request) string { v, _ := r.Context().Value(endpointKey{}).(string); return v }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	switch e := v.(type) {
+	case APIError:
+		noteCode(w, e.Code)
+	case OAuthError:
+		noteCode(w, e.Error)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
@@ -398,6 +453,11 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp, err = s.cfg.Authority.Refresh(rt)
+		if why := refreshReason(err); why != "" {
+			attemptOf(r.Context()).note("refresh " + why)
+		} else if err == nil {
+			attemptOf(r.Context()).note("refresh")
+		}
 	default:
 		writeOAuth(w, http.StatusBadRequest, OAuthUnsupportedGrantType, "unsupported grant_type")
 		return
@@ -424,6 +484,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 			"the grant store did not confirm the write; no token was returned, and the presented code or refresh token may already be consumed", "")
 	default:
 		n.ok = true
+		attemptOf(r.Context()).reach(PhaseAuth, resp.ClientID)
 		w.Header().Set("Pragma", "no-cache")
 		writeJSON(w, http.StatusOK, resp)
 	}
@@ -501,6 +562,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, perm string) *Lea
 		writeAuthErr(w, err)
 		return nil
 	}
+	attemptOf(r.Context()).reach(PhaseAuth, l.Grant.ClientID)
 	return l
 }
 
@@ -642,26 +704,61 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
 	_ = rc.Flush() // the client sees the open stream at once, before any event
+	att := attemptOf(r.Context())
+	att.reach(PhaseStream, "")
+	// writeFailed records why a write to the client failed: a write deadline
+	// (the client stopped reading) or the connection going away.
+	writeFailed := func(err error) {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			att.ended(FailTimeout, "")
+		} else {
+			att.ended(s.peerGone(), "")
+		}
+	}
 	send := func(event string, v any) bool {
 		data, _ := json.Marshal(v)
 		_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data); err != nil {
+			writeFailed(err)
 			return false
 		}
-		return rc.Flush() == nil
+		if err := rc.Flush(); err != nil {
+			writeFailed(err)
+			return false
+		}
+		return true
+	}
+	// end sends a terminal "end" event and records why.
+	end := func(code, reason string) {
+		att.ended(reason, code)
+		send("end", StreamEnd{Code: code})
 	}
 	if !ok {
-		send("end", StreamEnd{Code: CodeNotFound})
+		end(CodeNotFound, FailOther)
 		return
 	}
 	// The lease context carries both revocation and access-token expiry, and
 	// cancels the backend stream and any revalidation call with it.
 	ended := func() bool {
 		if code := l.AuthEnded(); code != "" {
+			att.ended(classifyAnswer("", 0, code), code)
 			send("auth", StreamEnd{Code: code})
 			return true
 		}
 		return false
+	}
+	// gone handles the request context ending (it also ends the lease): the
+	// client went away, or the listener is shutting down, when it says so
+	// before the connection closes.
+	gone := func() {
+		if ended() {
+			return
+		}
+		if s.closing.Load() {
+			end(CodeUnavailable, FailServerClosed)
+			return
+		}
+		att.ended(FailClientClosed, "")
 	}
 	keep := time.NewTicker(s.cfg.Keepalive)
 	defer keep.Stop()
@@ -669,19 +766,27 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-l.Context().Done():
-			ended()
+			gone()
 			return
 		case <-r.Context().Done():
+			gone()
 			return
 		case <-keep.C:
 			_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if _, err := io.WriteString(w, ": keepalive\n\n"); err != nil || rc.Flush() != nil {
+			if _, err := io.WriteString(w, ": keepalive\n\n"); err != nil {
+				writeFailed(err)
+				return
+			}
+			if err := rc.Flush(); err != nil {
+				writeFailed(err)
 				return
 			}
 		case b, open := <-batches:
 			if !open {
-				if !ended() {
-					send("end", StreamEnd{Code: CodeUnavailable})
+				if l.Context().Err() != nil {
+					gone() // the backend stream ended with the lease or the request
+				} else {
+					end(CodeUnavailable, FailServerUnavailable)
 				}
 				return
 			}
@@ -691,18 +796,18 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			if s.cfg.Now().Sub(validated) >= s.cfg.Revalidate {
 				if _, _, err := authorizeTarget(l, s.cfg.Backend, sid); err != nil {
 					if !ended() {
-						code := CodeNotFound
-						if !errors.Is(err, errNotFound) {
-							code = CodeUnavailable
+						if errors.Is(err, errNotFound) {
+							end(CodeNotFound, FailOther)
+						} else {
+							end(CodeUnavailable, FailServerUnavailable)
 						}
-						send("end", StreamEnd{Code: code})
 					}
 					return
 				}
 				validated = s.cfg.Now()
 			}
 			if l.Context().Err() != nil {
-				ended() // never send data after expiry or revocation
+				gone() // never send data after expiry or revocation
 				return
 			}
 			if !send("events", StreamBatch{Seq: b.Seq, Runtime: b.Runtime, Events: b.Events}) {

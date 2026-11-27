@@ -155,14 +155,18 @@ type Authority struct {
 	enrollCount int
 	enrollSince int64
 
-	access   map[string]accessRec // sha256(token) -> record; memory only
-	tomb     map[string]int64     // revoked access-token hashes -> exp
-	running  map[string]bool      // idempotency keys executing in this process
-	leases   map[string]map[*Lease]struct{}
-	closed   bool
-	degraded error                 // set after an ambiguous commit; blocks issuance until restart
-	onRevoke func(clientID string) // test hook, called after the barrier
-	audit    *auditLog             // direct-audit.jsonl (audit.go)
+	access map[string]accessRec // sha256(token) -> record; memory only
+	// graces is each client's latest rotation whose answer may have been
+	// lost (RefreshGrace); refreshStats counts refresh outcomes. Memory only.
+	graces       map[string]refreshGrace
+	refreshStats RefreshStats
+	tomb         map[string]int64 // revoked access-token hashes -> exp
+	running      map[string]bool  // idempotency keys executing in this process
+	leases       map[string]map[*Lease]struct{}
+	closed       bool
+	degraded     error                 // set after an ambiguous commit; blocks issuance until restart
+	onRevoke     func(clientID string) // test hook, called after the barrier
+	audit        *auditLog             // direct-audit.jsonl (audit.go)
 }
 
 // errDegraded refuses issuance after a commit whose durability is unknown.
@@ -272,6 +276,7 @@ func loadAuthority(st *store, life Lifetimes, now func() time.Time) (*Authority,
 		st: st, state: state, identity: id, life: life, now: now, boot: hex.EncodeToString(boot),
 		audit:  newAuditLog(st.root),
 		access: map[string]accessRec{}, tomb: map[string]int64{}, running: map[string]bool{}, leases: map[string]map[*Lease]struct{}{},
+		graces: map[string]refreshGrace{},
 	}
 	a.cloudSince = a.now().Unix()
 	a.enrollSince = a.cloudSince
@@ -599,7 +604,10 @@ func (a *Authority) issueLocked(g *grantRecord, access, refresh string, now int6
 
 // Refresh rotates a refresh token. The presented token is consumed and its
 // successor committed durably before the response. A consumed token presented
-// again revokes the whole grant: there is no grace window.
+// again revokes the whole grant, with one narrow exception (RefreshGrace): the
+// token consumed by the grant's latest rotation, re-presented within the grace
+// while nothing that rotation issued has been used, is rotated again. That
+// rotation's answer is taken as lost and its tokens are retired.
 func (a *Authority) Refresh(refresh string) (TokenResponse, error) {
 	access, err := randomToken(AccessTokenPrefix)
 	if err != nil {
@@ -628,22 +636,42 @@ func (a *Authority) Refresh(refresh string) (TokenResponse, error) {
 			break
 		}
 	}
+	// The grace (RefreshGrace): the token consumed by the latest rotation,
+	// re-presented soon after it while nothing that rotation issued was used.
+	grace, inGrace := refreshGrace{}, false
+	if g != nil && reused {
+		gr, ok := a.graces[g.ClientID]
+		inGrace = ok && gr.prev == h && now-gr.at <= int64(RefreshGrace/time.Second) &&
+			len(g.UsedRefresh) > 0 && g.UsedRefresh[len(g.UsedRefresh)-1] == h
+		grace = gr
+	}
 	switch {
 	case g == nil:
+		a.refreshStats.Unknown++
 		a.mu.Unlock()
-		return TokenResponse{}, errInvalidCode
-	case reused:
-		return a.revokeAndUnlock(g, "refresh token reuse", now)
-	case g.RevokedAt != 0 || now >= g.AbsoluteExpiry || now >= g.LastRefreshAt+g.IdleTTL || g.IdentityGeneration != a.identity.Generation:
+		return TokenResponse{}, &refreshRefusal{RefreshReasonUnknown}
+	case reused && !inGrace:
+		a.refreshStats.Reused++
+		return a.revokeAndUnlock(g, "refresh token reuse", now, RefreshReasonReused)
+	case g.RevokedAt != 0 || g.IdentityGeneration != a.identity.Generation:
+		a.refreshStats.Revoked++
 		a.mu.Unlock()
-		return TokenResponse{}, errInvalidCode
+		return TokenResponse{}, &refreshRefusal{RefreshReasonRevoked}
+	case now >= g.AbsoluteExpiry || now >= g.LastRefreshAt+g.IdleTTL:
+		a.refreshStats.Expired++
+		a.mu.Unlock()
+		return TokenResponse{}, &refreshRefusal{RefreshReasonExpired}
 	}
 	if len(g.UsedRefresh) >= maxUsedRefresh {
 		// Reuse detection must cover the grant's whole life, so the history is
 		// never truncated: at the bound the grant ends and the client enrolls again.
-		return a.revokeAndUnlock(g, "refresh rotation limit reached", now)
+		a.refreshStats.RotationMax++
+		return a.revokeAndUnlock(g, "refresh rotation limit reached", now, RefreshReasonRotation)
 	}
 	prevHash, prevAt, prevLen := g.RefreshHash, g.LastRefreshAt, len(g.UsedRefresh)
+	// On a grace retry the current hash is the successor whose answer was
+	// lost: it joins the consumed history, so whoever holds it revokes the
+	// grant by presenting it later. Reuse detection is kept.
 	g.UsedRefresh = append(g.UsedRefresh, g.RefreshHash)
 	g.RefreshHash, g.LastRefreshAt = hashToken(next), now
 	if err := a.commitLocked(); err != nil {
@@ -653,17 +681,94 @@ func (a *Authority) Refresh(refresh string) (TokenResponse, error) {
 		}
 		// On an ambiguous commit the old token stays consumed and the successor
 		// is never returned: the client must enroll again.
+		a.refreshStats.Unavailable++
 		a.mu.Unlock()
 		return TokenResponse{}, err
 	}
+	next0 := refreshGrace{prev: h, at: now}
+	if inGrace {
+		// The lost answer's access token must not stay usable beside the new
+		// one, and a retry never extends the window.
+		delete(a.access, grace.access)
+		next0.at = grace.at
+		a.refreshStats.GraceRetry++
+	} else {
+		a.refreshStats.OK++
+	}
 	resp := a.issueLocked(g, access, next, now)
+	next0.access = hashToken(access)
+	a.graces[g.ClientID] = next0
 	a.mu.Unlock()
 	return resp, nil
 }
 
+// RefreshGrace is how long after a rotation the refresh token it consumed may
+// be presented again without counting as reuse, provided nothing issued by
+// that rotation has been used since. It covers a rotation whose answer was
+// lost in transit (a dropped connection, a network change, a listener restart
+// mid-response), after which the client could otherwise only enroll again.
+// Memory only: a restart forgets every grace. A var for tests.
+var RefreshGrace = 60 * time.Second
+
+// refreshGrace is a client's latest rotation, whose answer may not have
+// arrived. prev is the hash of the token it consumed and at the time of the
+// first rotation in a chain of grace retries (a retry never extends the
+// window); access is the hash of the access token the latest rotation issued.
+// Admitting that access token proves the answer arrived and ends the grace,
+// as does presenting the successor refresh token (a normal rotation).
+type refreshGrace struct {
+	prev   string
+	at     int64
+	access string
+}
+
+// RefreshStats counts token-endpoint refresh outcomes (ConnStats.Refresh).
+type RefreshStats struct {
+	OK          int64 `json:"ok"`
+	GraceRetry  int64 `json:"grace_retry"`  // a consumed token re-presented within RefreshGrace (lost answer): rotated again
+	Reused      int64 `json:"reused"`       // a consumed token presented outside the grace: the grant was revoked
+	Expired     int64 `json:"expired"`      // idle or absolute lifetime over
+	Revoked     int64 `json:"revoked"`      // the grant was already revoked, or the identity was reset
+	Unknown     int64 `json:"unknown"`      // no grant has ever issued this token
+	RotationMax int64 `json:"rotation_max"` // the rotation limit ended the grant
+	Unavailable int64 `json:"unavailable"`  // the store did not confirm the write (or issuance is degraded)
+}
+
+// Refresh refusal reasons (refreshReason). They are telemetry only: the wire
+// answer stays a plain invalid_grant.
+const (
+	RefreshReasonUnknown  = "unknown"
+	RefreshReasonReused   = "reused"
+	RefreshReasonExpired  = "expired"
+	RefreshReasonRevoked  = "revoked"
+	RefreshReasonRotation = "rotation_limit"
+)
+
+// refreshRefusal is errInvalidCode with the reason a refresh was refused.
+type refreshRefusal struct{ reason string }
+
+func (e *refreshRefusal) Error() string        { return OAuthInvalidGrant + " (refresh " + e.reason + ")" }
+func (e *refreshRefusal) Is(target error) bool { return target == errInvalidCode }
+
+// refreshReason is the refusal reason of a refresh error ("" when it has none).
+func refreshReason(err error) string {
+	var rr *refreshRefusal
+	if errors.As(err, &rr) {
+		return rr.reason
+	}
+	return ""
+}
+
+// RefreshStats reports refresh outcomes since the authority opened.
+func (a *Authority) RefreshStats() RefreshStats {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.refreshStats
+}
+
 // revokeAndUnlock revokes g (refresh reuse or rotation limit), commits,
 // releases mu, drains its leases and reports invalid_grant.
-func (a *Authority) revokeAndUnlock(g *grantRecord, reason string, now int64) (TokenResponse, error) {
+func (a *Authority) revokeAndUnlock(g *grantRecord, reason string, now int64, refusal string) (TokenResponse, error) {
 	leases := a.markRevokedLocked(g, reason, now)
 	err := a.commitLocked()
 	a.mu.Unlock()
@@ -674,7 +779,7 @@ func (a *Authority) revokeAndUnlock(g *grantRecord, reason string, now int64) (T
 	case !drained:
 		return TokenResponse{}, fmt.Errorf("revocation (%s) persisted but operations did not finish within %s", reason, revokeDrain)
 	}
-	return TokenResponse{}, errInvalidCode
+	return TokenResponse{}, &refreshRefusal{refusal}
 }
 
 // RevokeToken implements RFC 7009 for a client signing itself out: revoking
@@ -1024,6 +1129,11 @@ func (a *Authority) Admit(parent context.Context, token, perm string) (*Lease, e
 	}
 	if !slices.Contains(g.Perms, perm) {
 		return nil, errDenied
+	}
+	if gr, ok := a.graces[g.ClientID]; ok && gr.access == h {
+		// The latest rotation's answer arrived: its consumed token is now
+		// plain reuse again.
+		delete(a.graces, g.ClientID)
 	}
 	// The lease ends at the access token's expiry: a stalled backend call is
 	// cancelled then, with a cause distinct from revocation.

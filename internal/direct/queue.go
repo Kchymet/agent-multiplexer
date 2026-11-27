@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -979,59 +981,97 @@ func (s *Server) serveWatch(w http.ResponseWriter, r *http.Request, frame func(c
 		HandshakeTimeout: 10 * time.Second,
 		CheckOrigin:      func(r *http.Request) bool { o := r.Header.Get("Origin"); return o == "" || s.originAllowed(o) },
 	}
+	att := attemptOf(r.Context())
 	conn, err := up.Upgrade(w, r, nil)
 	if err != nil {
+		att.fail(FailProtocol, "websocket_upgrade")
 		return
 	}
 	defer conn.Close()
 	conn.SetReadLimit(MaxWatchAuthSize)
+	var wmu sync.Mutex // one writer at a time: frames, pings and the close
 	closeWith := func(code int, reason string) {
+		wmu.Lock()
+		defer wmu.Unlock()
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var auth WatchAuth
 	if err := conn.ReadJSON(&auth); err != nil || auth.Type != "auth" {
+		if isTimeout(err) {
+			att.fail(FailTimeout, CodeAuthInvalid)
+		} else {
+			att.fail(FailAuthInvalid, CodeAuthInvalid)
+		}
 		closeWith(CloseAuthInvalid, CodeAuthInvalid)
 		return
 	}
-	_ = conn.SetReadDeadline(time.Time{})
 	l, err := s.cfg.Authority.Admit(r.Context(), auth.AccessToken, PermRead)
 	if err != nil {
 		switch {
 		case errors.Is(err, errAuthExpired):
+			att.fail(FailAuthExpired, CodeAuthExpired)
 			closeWith(CloseAuthExpired, CodeAuthExpired)
 		case errors.Is(err, errAuthRevoked):
+			att.fail(FailAuthRevoked, CodeAuthRevoked)
 			closeWith(CloseAuthRevoked, CodeAuthRevoked)
 		case errors.Is(err, errDenied):
+			noteCode(w, CodeDenied) // an answer, not a connection failure
 			closeWith(CloseDenied, CodeDenied)
 		default:
+			att.fail(FailAuthInvalid, CodeAuthInvalid)
 			closeWith(CloseAuthInvalid, CodeAuthInvalid)
 		}
 		return
 	}
 	defer l.Done()
+	att.reach(PhaseAuth, l.Grant.ClientID)
 	ctx, cancel := context.WithCancel(l.Context())
 	defer cancel()
+	// Liveness: a ping every WatchPing, and a peer that answers nothing (no
+	// pong, no frame) within pongWait is dead: its network went away without
+	// a FIN (a Wi-Fi/VPN switch, a sleeping laptop). The pings also keep NAT
+	// and VPN state alive across an idle inventory. Every client's WebSocket
+	// stack answers pings itself.
+	pongWait := 3 * s.cfg.WatchPing
+	alive := func() { _ = conn.SetReadDeadline(time.Now().Add(pongWait)) }
+	alive()
+	conn.SetPongHandler(func(string) error { alive(); return nil })
+	readErr := make(chan error, 1)
 	go func() {
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
+				readErr <- err
 				cancel()
 				return
 			}
+			alive()
 		}
 	}()
-	var wmu sync.Mutex
+	lastWrite := time.Now()
 	write := func(v any) bool {
 		wmu.Lock()
 		defer wmu.Unlock()
 		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		return conn.WriteJSON(v) == nil
+		if err := conn.WriteJSON(v); err != nil {
+			if isTimeout(err) {
+				att.ended(FailTimeout, "")
+			} else {
+				att.ended(s.peerGone(), "")
+			}
+			return false
+		}
+		lastWrite = time.Now()
+		return true
 	}
-	if !write(WatchWelcome{Type: "welcome", ServerID: s.cfg.Authority.ServerID(), ExpiresAt: l.ExpiresAt}) {
+	if !write(WatchWelcome{Type: "welcome", ServerID: s.cfg.Authority.ServerID(), ExpiresAt: l.ExpiresAt, Heartbeat: heartbeatMS(auth, s.cfg.WatchHeartbeat)}) {
 		return
 	}
+	att.reach(PhaseStream, "")
 	poll := time.NewTicker(s.cfg.WatchPoll)
 	defer poll.Stop()
+	ping := time.NewTicker(s.cfg.WatchPing)
+	defer ping.Stop()
 	var last []byte
 	push := func() bool {
 		v, err := frame(ctx, l)
@@ -1040,6 +1080,11 @@ func (s *Server) serveWatch(w http.ResponseWriter, r *http.Request, frame func(c
 		}
 		data, _ := json.Marshal(v)
 		if bytes.Equal(data, last) {
+			if auth.Heartbeat && time.Since(lastWrite) >= s.cfg.WatchHeartbeat {
+				// The client asked for a frame at least every heartbeat, so
+				// it can tell a quiet inventory from a dead socket.
+				return write(WatchHeartbeat{Type: "heartbeat"})
+			}
 			return true
 		}
 		last = data
@@ -1051,23 +1096,70 @@ func (s *Server) serveWatch(w http.ResponseWriter, r *http.Request, frame func(c
 	for {
 		select {
 		case <-ctx.Done():
-			switch l.AuthEnded() {
+			switch code := l.AuthEnded(); code {
 			case CodeAuthRevoked:
+				att.ended(FailAuthRevoked, code)
 				closeWith(CloseAuthRevoked, CodeAuthRevoked)
 			case CodeAuthExpired:
+				att.ended(FailAuthExpired, code)
 				closeWith(CloseAuthExpired, CodeAuthExpired)
 			case CodeGrantChanged:
 				// 4002: every client renews and reconnects on it, which
 				// re-admits the watch under the narrowed grant.
+				att.ended(FailAuthExpired, code)
 				closeWith(CloseAuthExpired, CodeGrantChanged)
+			default:
+				select {
+				case err := <-readErr:
+					switch {
+					case isTimeout(err):
+						att.ended(FailTimeout, "no_pong")
+					case s.closing.Load():
+						att.ended(FailServerClosed, "")
+					default:
+						att.ended(FailClientClosed, "")
+					}
+				default:
+					if s.closing.Load() {
+						// The listener is stopping: say so, so the client
+						// reconnects at once instead of guessing.
+						att.ended(FailServerClosed, "")
+						closeWith(websocket.CloseGoingAway, FailServerClosed)
+					} else {
+						att.ended(FailClientClosed, "")
+					}
+				}
 			}
 			return
+		case <-ping.C:
+			wmu.Lock()
+			err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+			wmu.Unlock()
+			if err != nil {
+				att.ended(s.peerGone(), "ping")
+				return
+			}
 		case <-poll.C:
 			if !push() {
 				return
 			}
 		}
 	}
+}
+
+// heartbeatMS is the heartbeat interval a welcome announces: set only when
+// the client asked for heartbeats (WatchAuth.Heartbeat).
+func heartbeatMS(a WatchAuth, d time.Duration) int64 {
+	if !a.Heartbeat {
+		return 0
+	}
+	return d.Milliseconds()
+}
+
+// isTimeout reports a deadline error.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return err != nil && (errors.Is(err, os.ErrDeadlineExceeded) || errors.As(err, &ne) && ne.Timeout())
 }
 
 // includeOverseer parses GET /sessions' optional ?include=overseer. Any other

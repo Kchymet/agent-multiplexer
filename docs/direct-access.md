@@ -75,7 +75,16 @@ the **overseer**, which has no admin power and is reachable as described in
    - **Bind address.** `--listen` must be a private or loopback IP literal:
      RFC 1918, 100.64/10, ULA, link-local or loopback. Anything else, including
      `0.0.0.0`, needs `--allow-public-bind`.
-   - **HTTPS.** It is mandatory, even on a private network.
+   - **HTTPS.** It is mandatory, even on a private network. The listener
+     offers HTTP/2, so a browser carries every request and transcript stream
+     on one connection. Over HTTP/1.1 a browser opens at most six connections
+     per origin, and with a few streams open, a refresh or hello queued behind
+     them indefinitely. The watch WebSocket stays on HTTP/1.1.
+   - **Address changes.** The listener checks every 30 seconds that its
+     address is still assigned to this host. If the LAN or VPN address moves
+     (a new DHCP lease, a VPN reconnect), `amux device status` warns and the
+     log records `network_changed`. Use an address that does not move (a
+     DHCP reservation, or [tailnet mode](#tailnet-mode), which re-derives).
    - **`--endpoint`.** Lists the exact origins clients dial. A request whose
      `Host` is not one of them gets `421 endpoint_not_bound`.
    - **`--allow-origin`.** Lists the exact browser origins allowed. There is
@@ -387,10 +396,16 @@ direct offer and the readiness marker all carry them.
 - If tailscaled is down or logged out at start, the child exits with that
   reason. The supervisor retries with backoff rather than binding a stale
   address.
-- While serving, the child re-reads its identity every 5 minutes. A changed
+- While serving, the child re-reads its identity every 30 seconds. A changed
   name or address is reported in the log, `status` and `doctor` instead of
-  being served silently. Re-deriving means a restart through the supervisor:
-  `amux device disable && amux device enable`, or the daemon's next start.
+  being served silently. When something it derived changed (the address, or
+  the name when the endpoint or certificate comes from it), the **managed**
+  child exits with `network_changed: …` as its reason, and the supervisor
+  starts it again on the new identity with its usual restart backoff (1
+  second after a run of more than a minute). A failure to
+  re-read tailscaled (it is restarting, or briefly logged out) is not treated
+  as a change. A manual `amux device serve` only reports the change; restart
+  it yourself.
 
 **Plain `amux device serve`.** With tailnet mode saved and `direct.enabled`
 on, plain `serve` refuses, because the daemon owns that configuration. With it
@@ -559,13 +574,30 @@ grant_type=urn:amux:params:oauth:grant-type:enrollment-code&code=…&client_labe
   90 days absolute. All lifetimes are configurable downward only.
 - **Strict rotation.** Each refresh consumes the presented token and durably
   commits its successor before responding. A consumed refresh token presented
-  again revokes the whole grant. There is no grace window.
+  again revokes the whole grant, except within the lost-answer grace below.
+- **Lost-answer grace (60 seconds).** A refresh answer can be lost after the
+  server committed it: a connection drops, the network changes, or the
+  listener restarts mid-response. The client then still holds only the token
+  it sent. For 60 seconds after a rotation, the token that rotation consumed
+  may be presented **once more per rotation**, as long as nothing the rotation
+  issued has been used (no request with its access token, no refresh with its
+  refresh token). The server then rotates again: it answers a fresh pair and
+  retires the lost pair. Reuse detection is kept, because the retired refresh
+  token becomes consumed history and presenting it later revokes the grant.
+  Outside those conditions (later than 60 seconds, an older token, or after
+  the lost answer's tokens were used), reuse revokes the grant as before. The
+  grace is memory only: a listener restart forgets it.
 - **Rotation limit.** A grant's consumed-token history is never truncated. At
   20,000 rotations the grant ends and the client must enroll again.
-- **Clients serialize refresh per backend, across browser tabs too.** They
-  never automatically retry an ambiguous refresh POST with the old token. A
-  response lost after the commit means enrolling again; report that as
-  "reauthorization required".
+- **Clients serialize refresh per backend, across browser tabs too.** When a
+  refresh POST got **no answer at all** (a transport error or timeout, never
+  an HTTP status), a client may retry it **once** with the same refresh token
+  within 60 seconds of sending it. Any HTTP answer is final: a `400
+  invalid_grant` means enrolling again, and so does a `503
+  temporarily_unavailable` (see the table). If the one retry also gets no
+  answer, or the window has passed, report "reauthorization required".
+  Servers before this change have no grace and revoke on that retry. A client
+  that cannot tell the server's version keeps the old rule and never retries.
 - **Rate limits are per source.** Failed attempts are counted per source
   address: 5 per minute, then `429` for that source only. One peer presenting
   bad tokens cannot block other clients' renewals.
@@ -759,7 +791,8 @@ new store, does not.
 cursor. The stream ends with a terminal SSE event:
 
 - `event: auth` with `{"code":"auth.expired"}` or `{"code":"auth.revoked"}`;
-- `event: end` with `{"code":"not_found"|"unavailable"}`.
+- `event: end` with `{"code":"not_found"|"unavailable"}`. The listener sends
+  `unavailable` too when it shuts down or restarts under the stream.
 
 The stream closes at access-token expiry even when idle. A stalled daemon call
 is cancelled then. Reconnect with `?after=<last seq>` after refreshing.
@@ -770,6 +803,21 @@ is cancelled then. Reconnect with `?after=<last seq>` after refreshing.
   within 5 seconds and at most 4 KiB. Nothing is sent before it is verified.
 - **Messages.** Then `welcome`, then `snapshot` whenever the filtered
   inventory changes.
+- **Liveness.** The server sends a WebSocket ping every 20 seconds. A peer
+  that answers nothing (no pong and no frame) for 60 seconds is closed as
+  dead, which is what a client whose network vanished without a FIN looks
+  like: a Wi-Fi or VPN switch, or a laptop that slept. Every client
+  WebSocket stack answers pings by itself. The pings also keep NAT and VPN
+  state alive while the inventory is quiet.
+- **Heartbeats (opt-in).** Browsers cannot see pings, so a client can ask for
+  application frames: `{"type":"auth","access_token":"…","heartbeat":true}`.
+  The welcome then carries `"heartbeat_ms":25000`, and the server sends
+  `{"type":"heartbeat"}` whenever it has sent nothing else for that long. A
+  client that sees no frame for about twice `heartbeat_ms` should treat the
+  socket as dead and reconnect. Without `heartbeat` (and from older servers,
+  whose welcome has no `heartbeat_ms`), nothing changes.
+- **Shutdown.** When the listener stops or restarts, an open watch closes
+  with 1001 (going away) and reason `server_closed`. Reconnect with backoff.
 - **Close codes:**
 
   | Code | Reason |
@@ -1327,6 +1375,141 @@ Every answer, item triage and overseer steer made over direct is appended to
   reads it, host-only, the same way `clients list` does.
 
 **Revocation** is the existing `amux device revoke`.
+
+## Connection diagnostics
+
+When a client cannot connect, the cause lies in one of a few places: the
+network path, TLS trust, the endpoint or origin configuration, the
+credential, or the listener's own lifecycle. The server and every client
+describe a connection attempt in the same terms, so a host-side record and a
+client-side record of the same failure can be read side by side.
+
+### Phases
+
+An attempt records the **furthest phase it reached**:
+
+| Phase | Reached when |
+| --- | --- |
+| `tcp` | a TCP connection was established (server: accepted) |
+| `tls` | the TLS handshake completed |
+| `http` | a request passed the server's Host and Origin gates (client: any HTTP answer from the endpoint) |
+| `auth` | a bearer token was admitted, or a refresh or enrollment exchange succeeded |
+| `stream` | a live stream was established (the watch's `welcome`, or an SSE transcript stream's `200`) |
+
+### Failure reasons (stable taxonomy)
+
+Each failed attempt, and each ended stream, carries exactly one `reason`.
+These values are a cross-client contract: the web and Android clients use
+the same strings. A value is never renamed or given another meaning. New ones
+may be added, and a client shows an unknown one as `other`.
+
+| Reason | Meaning | Who can see it | Typical fix |
+| --- | --- | --- | --- |
+| `unreachable` | No TCP connection: DNS, no route, refused, firewall, VPN down, Chromium Local Network Access denied | client | Check the route (LAN/VPN up, right address), the listener (`amux device status`) and the browser permission |
+| `tls_mismatch` | TLS handshake failed: certificate untrusted, wrong name, expired, pin mismatch, protocol version | both | Use a certificate the client trusts that covers the endpoint name |
+| `identity_mismatch` | TLS succeeded but the hello proof (or watch `welcome`) names another `server_id` | client | The host's identity was reset or this is another host: enroll again |
+| `config_mismatch` | The dialed host is not a configured endpoint (`421 endpoint_not_bound`) or the browser origin is not allowed (`403 origin_not_allowed`) | both (a browser often sees only a CORS failure) | `--endpoint` / `--allow-origin` |
+| `auth_invalid` | Unknown access token, usually because the listener restarted (access tokens are memory only) | both | One serialized refresh, then retry |
+| `auth_expired` | Access-token lifetime ended (also `auth.grant_changed`) | both | Refresh, reconnect. Normal every ≤ 10 minutes for streams |
+| `auth_revoked` | The grant is gone: revoked, refresh token expired, unknown or reused, or the identity was reset | both | Enroll again |
+| `rate_limited` | `429` from the per-source failure limiter | both | Wait `Retry-After` |
+| `timeout` | A connect, handshake, read, write or keepalive deadline passed (on the server: no pong from a watch peer, or a stalled reader) | both | Usually a dying network path; see `network_changed` |
+| `server_closed` | The listener stopped or restarted under an open connection (watch close 1001 `server_closed`, or a stream `end` while it shuts down) | both | Reconnect with backoff; check `amux device status` for restarts |
+| `server_unavailable` | The listener answered but the amux daemon behind it did not (`503 unavailable`, stream `end` `unavailable`) | both | Check the daemon |
+| `network_changed` | Client: the OS reported a network change during the attempt. Server: the listen address is no longer assigned to this host, or the tailnet identity changed | both | Re-derive or rebind; see below |
+| `client_closed` | The client went away, which is a normal end for a stream. On the server, a TLS handshake the client abandoned is recorded with this reason too, since clients that reject a certificate often just hang up | server | — |
+| `protocol` | Malformed or unsupported request: plain HTTP to the HTTPS port, a bad hello, a failed WebSocket upgrade | both | Client bug or wrong port |
+| `other` | Anything else | both | Read `detail` |
+
+Only connection-level failures get a reason. Application answers on a
+working connection (`denied`, `not_found`, `idem_*`, `rejected` and so on)
+are recorded as `ok` with their `code`.
+
+### Server side
+
+**Log.** Each attempt that matters writes one logfmt line to the listener's
+log (`amux device logs`), with no token, code or body:
+
+```
+direct: conn route=token phase=auth ok=true status=200 client=c_3f… remote=100.101.7.9:52144 dur_ms=4 detail=refresh
+direct: conn phase=tcp ok=false reason=tls_mismatch remote=192.168.1.40:51022 dur_ms=12 detail="remote error: tls: bad certificate"
+direct: conn route=sessions/{sid}/stream phase=stream ok=true reason=auth_expired code=auth.expired status=200 client=c_3f… remote=100.101.7.9:52150 dur_ms=600004
+direct: conn route=unrouted phase=tls ok=false reason=config_mismatch code=endpoint_not_bound status=421 remote=192.168.1.40:51030 dur_ms=0
+direct: conn route=listen phase=tcp ok=false reason=network_changed remote=192.168.1.20:8443 dur_ms=0 detail="the listen address is no longer assigned …"
+```
+
+The lines that are written:
+
+- every TLS handshake failure;
+- every hello, token, claim, revoke and cloud-enrollment exchange,
+  successful or not;
+- every refused request;
+- every stream, when it ends, with why it ended;
+- every change in whether the listen address is assigned.
+
+Successful ordinary requests are only counted. For a refresh, `detail` says
+`refresh` or `refresh <why>`, where `<why>` is `unknown`, `reused`,
+`expired`, `revoked` or `rotation_limit`.
+
+**Counters.** `amux device status --json` reports them under
+`server.connections`, since the listener started (`since`). They are
+memory only:
+
+| Field | Meaning |
+| --- | --- |
+| `tcp_accepted`, `tls_ok`, `tls_failed` | TCP connections accepted, and how their TLS handshakes ended |
+| `requests`, `authenticated` | HTTP requests, and how many reached `auth` |
+| `streams_opened`, `streams_active` | Live streams (watch sockets and SSE), total and open now |
+| `failures`, `failures_by_phase` | Failed attempts by reason, and by the furthest phase they reached |
+| `stream_ends` | Why streams ended, by reason (`client_closed` and `auth_expired` are normal) |
+| `refresh` | Refresh outcomes: `ok`, `grace_retry` (a lost answer recovered), `reused` (the grant was revoked), `expired`, `revoked`, `unknown`, `rotation_max`, `unavailable` |
+| `listen` | `addr`, `present` (still assigned to this host), `changed_at`, `changes` |
+| `recent` | The latest 64 recorded attempts, oldest first, each `{at_ms, route, client_id, remote, phase, ok, reason, code, status, duration_ms, detail}` |
+
+Plain `amux device status` prints a summary, the stream ends, the refresh
+line, a warning when the listen address is gone, and the last five attempts.
+
+**How to read it.**
+
+- Many `tls_failed` with `tls_mismatch`, or `client_closed` at phase `tcp`,
+  mean clients reach the host but reject its certificate.
+- `config_mismatch` means a client dials a name or origin that is not
+  configured.
+- `auth_invalid` right after `managed.restarts` went up means a listener
+  restart: expected, followed by one refresh.
+- A rising `refresh.reused` means a client lost a refresh answer outside the
+  grace, or two of its copies raced. Each one revoked a grant.
+- `stream_ends.timeout` means peers vanished without closing, which is
+  network churn on the client side.
+- `listen.present: false` means the LAN or VPN address the listener is bound
+  to has left the host. A manual `--listen` address must be fixed by hand. In
+  tailnet mode, the managed child re-derives on its own.
+- No counters moving at all while a client fails means the attempt never
+  reached the host: `unreachable` on the client.
+
+### Client side
+
+Each client keeps a **connection diagnostics record** per backend, visible in
+its UI and copyable or exportable as JSON. It holds no token, code or
+credential. Its shape:
+
+```json
+{
+  "backend": "<local backend id>", "server_id": "…", "endpoint": "https://amux.home.example:8443",
+  "client_id": "c_…", "app": "web|android", "app_version": "…", "exported_at_ms": 1764264000000,
+  "attempts": [
+    {"at_ms": 1764263990000, "kind": "hello|token|watch|stream|request", "route": "sessions/watch",
+     "phase": "tls", "ok": false, "reason": "tls_mismatch", "code": "", "status": 0,
+     "duration_ms": 31, "reconnect_attempt": 3, "backoff_ms": 4000, "detail": "net::ERR_CERT_AUTHORITY_INVALID"}
+  ]
+}
+```
+
+`attempts` is a bounded ring, newest last; 100 entries is a good size.
+`reconnect_attempt` counts consecutive retries since the last success, and
+`backoff_ms` is the delay before that attempt. A user reporting a failure
+attaches this record and the host's `amux device status --json`. Matching
+`at_ms`, `remote` and `client_id` lines one up with the other.
 
 ## S1 limits
 

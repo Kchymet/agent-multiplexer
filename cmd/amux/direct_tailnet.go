@@ -48,8 +48,10 @@ var directTailnetNow = time.Now
 var directTailnetRoots *x509.CertPool
 
 // directDriftInterval is how often the serving process re-reads its tailnet
-// identity to notice a changed MagicDNS name or address.
-var directDriftInterval = 5 * time.Minute
+// identity to notice a changed MagicDNS name or address. It is one LocalAPI
+// read over a local socket; until it notices, a managed listener serves an
+// address clients can no longer reach.
+var directDriftInterval = 30 * time.Second
 
 func tailnetStore(host string) tailnet.CertStore {
 	return tailnet.CertStore{Dir: tailnet.StoreDir(core.ConfigDir(), host), Host: host, Roots: directTailnetRoots}
@@ -370,7 +372,12 @@ var managedOwnsAddr = func(addr string) bool {
 // loads the certificate into a reloader, and returns the renewer to run for
 // as long as the listener does. A derivation failure is an error, so the
 // supervisor retries with backoff rather than binding a stale address.
-func applyTailnetServe(ctx context.Context, s directsvc.Settings, cfg *direct.ServeConfig, managed bool, fp string, logf func(string, ...any)) (func(context.Context), error) {
+//
+// restart, when set (the managed child), is called once when the derived name
+// or address changed under the running listener: the caller stops serving
+// and exits, and the supervisor restarts it, which re-derives. Without it
+// (a manual serve) the change is only reported.
+func applyTailnetServe(ctx context.Context, s directsvc.Settings, cfg *direct.ServeConfig, managed bool, fp string, logf func(string, ...any), restart func(reason string)) (func(context.Context), error) {
 	tn := *s.Tailnet
 	now := directTailnetNow()
 	client := &tailnet.Client{Socket: tailnet.Socket(tn.Socket)}
@@ -463,9 +470,10 @@ func applyTailnetServe(ctx context.Context, s directsvc.Settings, cfg *direct.Se
 	watchDrift := func(ctx context.Context) {
 		// The address, endpoint and certificate name were derived once, at
 		// start. If the tailnet identity changes underneath, say so (status
-		// and log) rather than serve a silent mismatch; re-deriving means a
-		// restart, which goes through the supervisor (amux device disable,
-		// then enable) or happens at the daemon's next start.
+		// and log) rather than serve a silent mismatch. Re-deriving means a
+		// restart: the managed child asks for one (restart), so the
+		// supervisor starts it again on the new identity within seconds; a
+		// manual serve only reports it.
 		t := time.NewTicker(directDriftInterval)
 		defer t.Stop()
 		for {
@@ -478,12 +486,21 @@ func applyTailnetServe(ctx context.Context, s directsvc.Settings, cfg *direct.Se
 			n, err := tailnet.Discover(dctx, client)
 			cancel()
 			msg := ""
+			rederive := false
 			switch {
 			case err != nil:
+				// tailscaled restarting or briefly logged out: not evidence
+				// that the identity changed, so never a restart.
 				msg = "cannot re-read the tailnet identity: " + err.Error()
 			case n.DNSName != node.DNSName || (!tn.ListenExplicit && n.IP != node.IP):
+				rederive = (!tn.ListenExplicit && n.IP != node.IP) ||
+					(n.DNSName != node.DNSName && (!tn.EndpointExplicit || tn.CertSource == tailnet.CertTailscale))
 				msg = fmt.Sprintf("the tailnet now reports %s (%s) but this listener was derived for %s (%s); turn it off and on (amux device disable && amux device enable) to re-derive",
 					n.DNSName, n.IP, node.DNSName, node.IP)
+				if rederive && restart != nil {
+					msg = fmt.Sprintf("network_changed: the tailnet now reports %s (%s) but this listener was derived for %s (%s); restarting to re-derive",
+						n.DNSName, n.IP, node.DNSName, node.IP)
+				}
 			}
 			mu.Lock()
 			changed := msg != drift
@@ -494,6 +511,10 @@ func applyTailnetServe(ctx context.Context, s directsvc.Settings, cfg *direct.Se
 					logf("direct: %s", msg)
 				}
 				publish(r.State())
+			}
+			if rederive && restart != nil {
+				restart(msg)
+				return
 			}
 		}
 	}
