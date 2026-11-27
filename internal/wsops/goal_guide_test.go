@@ -94,8 +94,10 @@ func TestCoordinatorGuideDescribesItsRealLifecycle(t *testing.T) {
 // Users ended up with dozens of finished workgroups idling on the dashboard. On
 // every harness a finished coordinator wraps up its own workgroup: it archives
 // itself only when "done" is proven (every PR verified MERGED on GitHub, nothing
-// pending), asks otherwise — closed-unmerged PRs and any doubt included — never
-// forces, and archives as the last step after its final summary.
+// pending), waits for the user's merge without asking while that is all that
+// remains, asks only when unsure the work is done — closed-unmerged PRs and any
+// doubt included — never forces, and archives as the last step after its final
+// summary.
 func assertCoordinatorWrapsUp(t *testing.T, kind, guide, id string) {
 	t.Helper()
 	// The guide is hard-wrapped prose; match phrases against its unwrapped form.
@@ -104,7 +106,12 @@ func assertCoordinatorWrapsUp(t *testing.T, kind, guide, id string) {
 		"does not archive the workgroup by itself",
 		"archive every finished member",
 		"## Wrapping up this workgroup",
-		"either archive yourself or ask the user whether to; never just stop",
+		"wait for the user's merge, archive yourself, or — only when you are not sure the work is done — ask the user; never just stop",
+		// Waiting on the user's merge is the default, never a question.
+		"**Waiting on the user's merge is the default, not a question.**",
+		"the only remaining step is the user's merge, do not ask whether to archive",
+		"once every PR is MERGED and nothing else is pending, archive (below) without asking",
+		"PRs that are open only because the user has not merged them yet are not doubt",
 		// The root id and where it comes from.
 		"Your workgroup's root id is `" + id + "` (`$AMUX_WORKGROUP` in your environment; `$AMUX_ROOT` is set only for members and is empty for you)",
 		// Auto-archive: every PR verified MERGED from GitHub itself.
@@ -116,7 +123,7 @@ func assertCoordinatorWrapsUp(t *testing.T, kind, guide, id string) {
 		"no follow-up pending or offered, no open decision, no member running (`amux ls --json`), no unanswered user message, and nothing left open in the PR ledger",
 		// Archive-once-merged is the default; a user instruction is standing permission.
 		"**\"Archive once every PR is merged\" is the default.**",
-		"archive without asking for fresh confirmation",
+		"archive without asking for confirmation",
 		"is **standing permission** for exactly that",
 		"Standing permission never overrides the rules below",
 		// The command must match the user's allow rule.
@@ -124,9 +131,9 @@ func assertCoordinatorWrapsUp(t *testing.T, kind, guide, id string) {
 		"`Bash(amux agent done)`",
 		"do not retry, rephrase or work around it",
 		// Ask on any doubt.
-		"**Ask instead — do not auto-archive — when ANY of these is true:**",
+		"**Ask only when you are genuinely unsure the work is done**",
 		"trailing questions, offered follow-ups, or open decisions",
-		"several PRs and any one is not merged, or the set of PRs is unclear",
+		"a PR closed without merging, or the set of PRs is unclear",
 		"any uncertainty at all about being done",
 		"failing CI that was merged anyway, work handed to another workgroup",
 		"When in doubt, ask; never guess.",
@@ -141,13 +148,12 @@ func assertCoordinatorWrapsUp(t *testing.T, kind, guide, id string) {
 		"If it fails (for example an open PR), the workgroup stays open: report the error and ask the user instead.",
 		"Restoration is host-only",
 		"Previously completed members stay archived",
-		// The question and its three answers.
+		// The question, asked only when unsure, and its two answers.
 		"### Asking whether to archive",
+		"Ask only in the \"unsure\" cases above, never merely because a PR awaits the user's merge.",
 		"**Archive now**",
-		"**Keep open: waiting on my PR merge**",
-		"once every PR is MERGED and nothing else is pending, archive without asking again",
-		"A PR closed without merging, or anything new, means you ask again.",
 		"**Keep open: I have more work**",
+		"If the answer leaves member PRs open only for the user's merge, wait for it as above, without asking again.",
 	} {
 		if !strings.Contains(flat, want) {
 			t.Errorf("%s guide missing %q", kind, want)
@@ -160,6 +166,10 @@ func assertCoordinatorWrapsUp(t *testing.T, kind, guide, id string) {
 		"automatically marks the workgroup done",
 		"stops its coordinator and members",
 		"archive yourself with --force",
+		// Waiting on a merge is the default, not an option the user must pick.
+		"Keep open: waiting on my PR merge",
+		"several PRs and any one is not merged",
+		"otherwise ask)",
 	} {
 		if strings.Contains(flat, forbidden) {
 			t.Errorf("%s guide still carries stale archive wording: %q", kind, forbidden)
@@ -168,7 +178,7 @@ func assertCoordinatorWrapsUp(t *testing.T, kind, guide, id string) {
 }
 
 // The wrap-up question uses each harness's mechanism that actually reaches the
-// user on every client, and "waiting on my PR merge" keeps a wake-up path: a
+// user on every client, and waiting on the user's merge keeps a wake-up path: a
 // completed Claude goal takes no PR wake-ups, so it must wait instead.
 func TestCoordinatorWrapUpAskAndWaitPerHarness(t *testing.T) {
 	flat := func(s store.Session) string {
@@ -179,8 +189,9 @@ func TestCoordinatorWrapUpAskAndWaitPerHarness(t *testing.T) {
 		"Use the native question UI, the `AskUserQuestion` tool",
 		"web dashboard and the Android app",
 		"First run `amux agent goal ask \"Archive this workgroup?\"`",
-		"do not complete the goal (a completed goal gets no PR wake-ups)",
-		"`amux agent goal wait \"awaiting the user's merge of <repo#PR, …>\"`",
+		"do not complete the goal yet (a completed goal gets no PR wake-ups)",
+		"`amux agent goal wait \"awaiting merge of <repo#PR, …>\"`",
+		"While the only remaining step is the user's merge, do not ask and do not complete the goal yet",
 	} {
 		if !strings.Contains(claude, want) {
 			t.Errorf("claude wrap-up missing %q", want)

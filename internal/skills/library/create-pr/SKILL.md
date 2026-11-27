@@ -314,11 +314,16 @@ completion archives only that member.
   (`gh pr view <n> --json state,mergedAt`), never on "opened", "ready" or a
   member's word; and nothing is outstanding: no follow-up pending or offered, no
   open decision, no member running, no unanswered user message.
-- **Otherwise ask** whether to archive (Claude Code: `AskUserQuestion`; Codex: a
-  plain-text question), offering "Archive now", "Keep open: waiting on my PR
-  merge" and "Keep open: I have more work". Ask whenever any PR is not merged,
-  the set of PRs is unclear, a PR was closed without merging, or anything at all
-  is uncertain. When in doubt, ask; never guess.
+- **While the only remaining step is the user's merge, wait — do not ask.**
+  When every PR is green and ready and nothing else is pending, run
+  `amux agent goal wait "awaiting merge of <repo#PR, …>"` (Claude Code; keep the
+  goal active so PR wake-ups arrive) or block on `amux agent wait` (Codex), and
+  archive without asking once every PR is MERGED.
+- **Ask only when unsure the work is done** (Claude Code: `AskUserQuestion`;
+  Codex: a plain-text question), offering "Archive now" and "Keep open: I have
+  more work": a PR closed without merging, the set of PRs unclear, partial
+  results, skipped steps, open decisions, follow-ups or inbox items, or a member
+  with an unclear outcome. When in doubt, ask; never guess.
 - Never pass `--force` to archive yourself, never archive while a member is
   running, and run `amux agent done` as the last tool call, after the final
   summary in `COORDINATION.md` and the final message.

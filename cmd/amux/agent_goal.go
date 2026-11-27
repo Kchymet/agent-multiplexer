@@ -138,7 +138,7 @@ func goalMark(status string, args []string) error {
 	}
 	switch status {
 	case claudegoal.StatusComplete:
-		fmt.Println("goal complete: give your final summary, then wrap up the workgroup. Archive it (`amux agent done` as your last tool call, never --force) only if every PR is verified MERGED on GitHub and nothing is pending; otherwise ask the user whether to archive.")
+		fmt.Println("goal complete: give your final summary, then wrap up the workgroup. Archive it (`amux agent done` as your last tool call, never --force) once every PR is verified MERGED on GitHub and nothing is pending, without asking. If a PR still awaits only the user's merge, do not ask: run `amux agent goal wait \"awaiting merge of <repo#PR, …>\"` and end the turn so PR wake-ups reach you. Ask whether to archive only if you are unsure the work is done.")
 		fmt.Print(finishedMemberReminder())
 	case claudegoal.StatusInput:
 		fmt.Println("goal waiting for input: ask the user your question and end the turn; their reply resumes the goal.")

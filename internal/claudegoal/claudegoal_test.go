@@ -244,8 +244,9 @@ func TestRestartPromptIsNeverANewTask(t *testing.T) {
 }
 
 // A finished coordinator must wrap up its workgroup instead of idling forever:
-// archive itself only when every PR is verified MERGED and nothing is pending,
-// otherwise ask (before completing the goal, so PR wake-ups still reach it).
+// archive itself once every PR is verified MERGED and nothing is pending, wait
+// for the user's merge without asking (goal still active, so PR wake-ups reach
+// it), and ask only when unsure the work is done.
 func TestContinuationWrapsUpTheWorkgroup(t *testing.T) {
 	prompt := ContinuationPrompt(State{Status: StatusActive, Objective: "ship it"})
 	for _, want := range []string{
@@ -254,16 +255,20 @@ func TestContinuationWrapsUpTheWorkgroup(t *testing.T) {
 		"never on \"opened\", \"ready\" or a member's word",
 		"no follow-up, open decision, running member or unanswered user message",
 		"`amux agent done` as the last tool call (never --force)",
-		"ask before completing the goal",
-		"`amux agent goal ask \"Archive this workgroup?\"`, then AskUserQuestion",
-		"Archive now / Keep open: waiting on my PR merge / Keep open: I have more work",
+		"the only remaining step is the user's merge, do not ask and do not complete the goal yet",
 		"a completed goal gets no PR wake-ups",
-		"archive without asking again once all are MERGED",
-		"A PR closed without merging, or any doubt, means ask; never guess.",
+		"`amux agent goal wait \"awaiting merge of <repo#PR, …>\"`",
+		"archive without asking once all are MERGED",
+		"Ask only when unsure the work is done — a PR closed without merging",
+		"`amux agent goal ask \"Archive this workgroup?\"`, then AskUserQuestion",
+		"Archive now / Keep open: I have more work",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("continuation prompt missing %q", want)
 		}
+	}
+	if strings.Contains(prompt, "waiting on my PR merge") {
+		t.Error("continuation prompt still makes waiting on a merge a question")
 	}
 }
 

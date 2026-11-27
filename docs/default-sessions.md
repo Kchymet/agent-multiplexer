@@ -160,9 +160,12 @@ that supervises exactly that natively: Codex's App Server thread goal
   `amux do set-archived <member> -f archived=true` during the task and for
   every finished member before it reports completion; a member that still owns
   an open PR is never archived, and a finished one is kept only when reuse is
-  expected, with the reason. It then ends
-  by asking the user whether to archive the workgroup or give it another task. After explicit user confirmation,
-  the coordinator can run `amux agent done` to archive its workgroup and members.
+  expected, with the reason. While member PRs await only the user's merge, the
+  coordinator waits for the merge without asking (`amux agent goal wait`), and
+  once every PR is merged and nothing is pending it archives its workgroup and
+  members itself with `amux agent done`. It asks the user whether to archive
+  only when it is unsure the work is done (a PR closed without merging, partial
+  results, open decisions or items).
   The host can also archive it (`x` on the rail, `amux archive <id>`).
   Both stop runtimes and revoke credentials; transcripts and worktrees remain.
   Only the host can restore: restoring the workgroup also restores its previously

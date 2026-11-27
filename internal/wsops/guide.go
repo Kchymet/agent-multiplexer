@@ -729,21 +729,33 @@ triage your inbox (see "Triage upward items"); the summary lists the item ids
 you raised, escalated or left open.
 Archiving finished members (PR merged or closed) with
 ` + "`amux archive <member>`" + ` needs no confirmation; a
-member whose PR is still open keeps babysitting it. Then wrap up the workgroup.
+member whose PR is still open keeps babysitting it. Then wrap up the workgroup;
+when the user's merge is all that remains, wait for it instead of asking.
 
 ` + wrapUpSection(root)
 }
 
 // wrapUpSection makes a finished coordinator close its own workgroup instead of
-// sitting idle forever: it archives itself only when "done" is proven, and
-// otherwise asks the user with its harness's question mechanism. Both goal
-// runtimes get the same rules; only the asking and waiting mechanics differ.
+// sitting idle forever: while only the user's merge remains it waits for the
+// merge (never asks), it archives itself once "done" is proven, and it asks the
+// user with its harness's question mechanism only when it is genuinely unsure
+// the work is done. Both goal runtimes get the same rules; only the asking and
+// waiting mechanics differ.
 func wrapUpSection(root store.Session) string {
 	return fmt.Sprintf(`## Wrapping up this workgroup
 A finished workgroup must not sit idle on the rail forever. When a task is
-finished, either archive yourself or ask the user whether to; never just stop.
+finished, wait for the user's merge, archive yourself, or — only when you are
+not sure the work is done — ask the user; never just stop.
 Your workgroup's root id is `+"`%s`"+` (`+"`$AMUX_WORKGROUP`"+` in your environment;
 `+"`$AMUX_ROOT`"+` is set only for members and is empty for you).
+
+**Waiting on the user's merge is the default, not a question.** When every
+member PR is green and marked ready for review and the only remaining step is
+the user's merge, do not ask whether to archive and do not ask the user to tell
+you to wait: %s On each wake, re-verify the ledger
+from GitHub: once every PR is MERGED and nothing else is pending, archive
+(below) without asking. A PR closed without merging, or anything new, is a
+reason to re-check whether you are sure the work is done.
 
 **Auto-archive only when ALL of these hold** — verify each yourself, now:
 - Every PR this workgroup produced is **MERGED**. Check GitHub yourself for each
@@ -757,22 +769,24 @@ Your workgroup's root id is `+"`%s`"+` (`+"`$AMUX_WORKGROUP`"+` in your environm
   was resolved, dismissed or escalated to the global inbox).
 
 **"Archive once every PR is merged" is the default.** When all of the above
-hold, archive without asking for fresh confirmation. A user instruction such as
+hold, archive without asking for confirmation. A user instruction such as
 "archive once merged" or "archive when you're done" is **standing permission**
 for exactly that: note it in `+"`COORDINATION.md`"+`, and on the wake where every
 PR is MERGED and nothing is outstanding, archive without asking again. Standing
-permission never overrides the rules below: if any "Ask instead" case applies,
+permission never overrides the rules below: if any "unsure" case applies,
 ask anyway.
 
-**Ask instead — do not auto-archive — when ANY of these is true:**
+**Ask only when you are genuinely unsure the work is done** — do not
+auto-archive and do not just wait — when ANY of these is true:
 - trailing questions, offered follow-ups, or open decisions;
 - any item still open or acknowledged in your inbox — name each in the
   question, and say that archiving hands it to the global inbox;
-- several PRs and any one is not merged, or the set of PRs is unclear;
+- a PR closed without merging, or the set of PRs is unclear;
 - any uncertainty at all about being done: partial results, skipped steps,
   failing CI that was merged anyway, work handed to another workgroup, a member
   idle with an unclear outcome, the user seeming to want to keep talking.
-When in doubt, ask; never guess.
+When in doubt, ask; never guess. PRs that are open only because the user has
+not merged them yet are not doubt: wait for the merge as above.
 
 **Never archive** while a member is still running, or while the user's last
 message is unanswered (answer it first). Never pass `+"`--force`"+` (or
@@ -808,19 +822,18 @@ restores previously active members too. Previously completed members stay
 archived.
 
 ### Asking whether to archive
-%s
+Ask only in the "unsure" cases above, never merely because a PR awaits the
+user's merge. %s
 Offer exactly these options:
 - **Archive now** — archive as above. Items still open in your inbox move to the
   global inbox. While a member PR is still open amux
   refuses; say so and leave the override to the user.
-- **Keep open: waiting on my PR merge** — %s On each wake, re-verify the ledger
-  from GitHub: once every PR is MERGED and nothing else is pending, archive
-  without asking again. A PR closed without merging, or anything new, means you
-  ask again.
 - **Keep open: I have more work** — finish your summary, complete your goal if
   you are in goal mode and have not yet, and end the turn; the user's next
   message is the next task.
-`, root.ID, root.ID, root.ID, wrapUpAsk(root), wrapUpWaitMerge(root))
+If the answer leaves member PRs open only for the user's merge, wait for it as
+above, without asking again.
+`, root.ID, wrapUpWaitMerge(root), root.ID, root.ID, wrapUpAsk(root))
 }
 
 // wrapUpAsk is how a coordinator asks the wrap-up question on its harness.
@@ -838,7 +851,7 @@ is attached to your goal instead of replacing it; then ask with
 ` + "`AskUserQuestion`" + `, stating briefly what is done and what is still open.`
 	}
 	return `Ask in plain text in your final message, naming what is done, what is still open,
-and the three options below, then end the turn; the user's reply arrives as your
+and the options below, then end the turn; the user's reply arrives as your
 next task. (Do not use ` + "`request_user_input`" + ` for this question: amux leaves it
 open for an attached terminal, and the web dashboard and the Android app only
 see a notice they cannot answer.)` + codexAskGoalNote(root)
@@ -857,13 +870,13 @@ is not continued while you wait for the answer.`
 // its goal waiting; Codex and plain coordinators block on amux's own events.
 func wrapUpWaitMerge(root store.Session) string {
 	if agent.HookGoals(root) {
-		return `do not complete the goal (a completed goal gets no PR
-  wake-ups). Run ` + "`amux agent goal wait \"awaiting the user's merge of <repo#PR, …>\"`" + `
-  and end the turn; amux wakes you when those PRs merge, close or change.`
+		return `do not complete the goal yet (a completed goal gets no PR
+wake-ups). Run ` + "`amux agent goal wait \"awaiting merge of <repo#PR, …>\"`" + `
+and end the turn; amux wakes you when those PRs merge, close or change.`
 	}
 	return `keep the task open and block on amux's own events
-  instead of polling: ` + "`amux agent wait <member>... --timeout 30m`" + ` on the members
-  owning those PRs returns when their PRs change.`
+instead of polling: ` + "`amux agent wait <member>... --timeout 30m`" + ` on the members
+owning those PRs returns when their PRs change.`
 }
 
 // goalSection tells a coordinator how its task lifecycle actually works. On the
@@ -902,8 +915,10 @@ never need `+"`create_goal`"+`; `+"`get_goal`"+` shows the objective, status, bu
   verified — never because you are stopping, out of ideas, or near a budget.
   Archive every finished member first (see "Archiving finished members");
   completing the goal does not do it for you, and it does not archive the
-  workgroup: wrap up as "Wrapping up this workgroup" says (archive yourself only
-  when every PR is verified merged and nothing is pending; otherwise ask). Give
+  workgroup: wrap up as "Wrapping up this workgroup" says (while the only
+  remaining step is the user's merge, wait for it without asking; archive
+  yourself once every PR is verified merged and nothing is pending; ask only
+  when you are unsure the work is done). Give
   your final summary before ending that turn; the user's next task becomes a
   fresh goal with its own accounting.
 - Ask the user only for genuine input (`+"`request_user_input`"+`); an open question is
@@ -947,9 +962,13 @@ status.
   finished members"). When unarchived idle members remain, it lists them with
   the archive command: archive the finished ones, or say why each is kept, in
   your final summary in the same turn. Completing the goal does not archive the
-  workgroup: wrap up as "Wrapping up this workgroup" says (archive yourself only
-  when every PR is verified merged and nothing is pending; otherwise ask before
-  completing the goal, since a completed goal gets no PR wake-ups).
+  workgroup: wrap up as "Wrapping up this workgroup" says. While the only
+  remaining step is the user's merge, do not ask and do not complete the goal
+  yet (a completed goal gets no PR wake-ups): run
+  `+"`amux agent goal wait \"awaiting merge of <repo#PR, …>\"`"+` and end your turn.
+  Once every PR is verified merged and nothing is pending, complete the goal and
+  archive yourself without asking. Ask only when you are unsure the work is
+  done, and before completing the goal.
 
 ### Getting what you need from the user
 Before dispatching work, check the task for gaps. When the task is missing
