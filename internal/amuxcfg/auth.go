@@ -16,7 +16,7 @@ const (
 	// AuthHost inherits the host harness login through the legacy shared
 	// credential file (Linux) or the macOS Keychain broker.
 	AuthHost = "host"
-	// AuthShared uses the legacy store created by older `amux auth login`.
+	// AuthShared uses the legacy store created by older `amux harness login`.
 	AuthShared = "shared"
 	// AuthEnvironment provides no amux credential: API keys, apiKeyHelper,
 	// cloud providers and gateways come from the inherited environment and the

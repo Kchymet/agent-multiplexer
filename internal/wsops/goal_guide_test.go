@@ -23,8 +23,8 @@ func TestCoordinatorGuideDescribesItsRealLifecycle(t *testing.T) {
 		"native", "update_goal", "complete",
 		"request_user_input",             // ask only for genuine input
 		"amux do steer wg1 -f verb=goal", // the user's pause/resume/clear
-		"amux do add-agent wg1",
-		"amux do set-archived",
+		"amux add wg1",
+		"amux archive <member>",
 		"choose the sensible default", // decide and keep going
 	} {
 		if !strings.Contains(guide, want) {
@@ -113,7 +113,7 @@ func assertCoordinatorWrapsUp(t *testing.T, kind, guide, id string) {
 		"`gh pr view <n> --repo <owner/repo> --json state,mergedAt`",
 		"never trust \"opened\", \"ready\", or a member's word",
 		"A PR **closed without merging is not done**: ask.",
-		"no follow-up pending or offered, no open decision, no member running (`amux status --json`), no unanswered user message, and nothing left open in the PR ledger",
+		"no follow-up pending or offered, no open decision, no member running (`amux ls --json`), no unanswered user message, and nothing left open in the PR ledger",
 		// Archive-once-merged is the default; a user instruction is standing permission.
 		"**\"Archive once every PR is merged\" is the default.**",
 		"archive without asking for fresh confirmation",
@@ -134,7 +134,7 @@ func assertCoordinatorWrapsUp(t *testing.T, kind, guide, id string) {
 		"Never pass `--force`",
 		// The command and the safe order.
 		"`amux agent done` is the command: it archives this workgroup (" + id + ") and its direct members",
-		"the host's `amux workgroup archive " + id + "`",
+		"the host's `amux archive " + id + "`",
 		"Write the final summary to `COORDINATION.md`",
 		"run `amux agent done` as the **last** tool call of the turn",
 		"stops your runtime only once the turn has ended",
@@ -269,7 +269,7 @@ func TestCoordinatorGuideRequiresReadyMemberPRs(t *testing.T) {
 // the allowlist refuses sends the model into an error it cannot diagnose.
 func TestConsoleGuideTeachesCoordinatorFields(t *testing.T) {
 	guide := consoleGuide(store.Session{ID: "console", Agent: "claude", Dir: "/sandbox/console", Mode: store.ModeConsole})
-	for _, want := range []string{FieldCoordinator, FieldCoordinatorModel, agent.GoalRuntime} {
+	for _, want := range []string{"--coordinator ", "--coordinator-model", agent.GoalRuntime} {
 		if !strings.Contains(guide, want) {
 			t.Errorf("console guide does not teach %q", want)
 		}
@@ -318,7 +318,7 @@ func TestCoordinatorGuideTracksMemberPRsToMergedOrClosed(t *testing.T) {
 			"Never end a turn with open member PRs and nothing that will bring you back",
 			"A task is finished only when every member PR it produced is **merged or closed**, or explicitly handed to the user.",
 			"exactly what needs a human (e.g. merge approval",
-			"Archiving finished members (PR merged or closed) with `amux do set-archived <member> -f archived=true` needs no confirmation; a member whose PR is still open keeps babysitting it.",
+			"Archiving finished members (PR merged or closed) with `amux archive <member>` needs no confirmation; a member whose PR is still open keeps babysitting it.",
 		} {
 			if !strings.Contains(guide, want) {
 				t.Errorf("%s coordinator guide missing %q", kind, want)

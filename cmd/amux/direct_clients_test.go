@@ -79,7 +79,7 @@ func TestDirectClientsListStaleCLI(t *testing.T) {
 	if got.Op != direct.OpList || !got.Stale || got.StaleDays != 30 {
 		t.Fatalf("request: %+v", got)
 	}
-	for _, want := range []string{"stale: superseded by c_2", "by host:cli:me (was read,steer all_sessions)", "clients revoke"} {
+	for _, want := range []string{"stale: superseded by c_2", "by host:cli:me (was read,steer all_sessions)", "amux device revoke"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("output lacks %q:\n%s", want, out.String())
 		}

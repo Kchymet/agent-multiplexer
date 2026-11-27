@@ -296,7 +296,7 @@ func (ws *wakeStore) flush(force bool) error {
 	case errors.Is(err, errNotCommitted):
 		return err
 	default:
-		ws.degraded = "wake store write durability unknown; restart `amux direct serve` to reconcile"
+		ws.degraded = "wake store write durability unknown; restart `amux device serve` to reconcile"
 		return err
 	}
 }

@@ -2,28 +2,30 @@ amux — AI-native terminal control plane
 
 usage: amux [command] [flags]
 
-commands:
-  (bare)     open the workgroup dashboard (native TUI); without a terminal, print this help
-  repo       track the repositories agents get worktrees of
-  workgroup  create, open and manage workgroups and their agents  (alias: wg, session, ses, workspace, ws)
-  agent      commands an agent runs about itself (status, name, raise, wait, done, ...)
-  status     print workgroups and their agents, then exit
-  top        per-session CPU/memory, top processes and amux's own overhead
-  queue      the user question queue: list, answer, dismiss, acknowledge  (alias: q)
-  question   answer agents' questions with every feature of their own dialog
-  do         drive one daemon control action (the scripting entrypoint)
-  refresh    ask the daemon to re-poll its sources now
-  doctor     health check: versions, compatibility, dependencies and runtime  (alias: health, check)
-  config     show or change amux settings (keybindings, Codex control, updates, ...)  (alias: conf, cfg)
-  harness    amux-managed Claude Code / Codex installs  (alias: harnesses)
-  sandbox    each agent's private copy of your harness config: drift, promote, reset  (alias: sb)
-  auth       central harness logins, delivered to sessions by the daemon
-  provide    provide this machine as remote compute (provider mode)
-  direct     direct client access (web, Android) over your LAN or VPN (opt-in, host only)
-  daemon     run or control the local daemon (restart loads a new binary)
-  version    print CLI, daemon and database versions and compatibility  (alias: --version, -v)
-  update     install the latest amux release  (alias: upgrade)
-  licenses   print bundled dependency licenses and notices  (alias: notices)
+work:
+  (bare)   open the dashboard (without a terminal, print this help)
+  new      start a workgroup (no args: the create form)
+  ls       workgroups and agents (state, PRs)
+  open     open the dashboard on a workgroup or agent
+  send     message an agent or workgroup (queued if busy; --now / --stop)
+  add      add an agent to a workgroup
+  archive  finish a workgroup (refuses while PRs are open)
+
+manage:
+  inbox    questions and follow-ups waiting for you
+  repo     track the repositories agents get worktrees of
+  device   phones and browsers that reach this machine directly (host only)
+  cloud    reach this machine through Harness cloud
+  harness  Claude Code / Codex installs and logins
+  config   show or change amux settings (keybindings, Codex control, updates, ...)
+  daemon   run or control the local daemon (restart loads a new binary)
+  doctor   health check: versions, compatibility, dependencies and runtime
+  update   install the latest amux release
+  version  print CLI, daemon and database versions and compatibility
+  help     help for amux or a command (help agent, help api, help --all)
+
+more: rename · unarchive · rm · move · recreate · top · refresh · licenses
+agents: amux help agent   scripting: amux help api
 
 flags:
   -h, --help     show help for amux or for the command it follows
@@ -33,4 +35,4 @@ flags:
 
 Set AMUX_SKIP=1 in your shell to bypass auto-launch.
 
-Run 'amux <command> --help' for details. 'amux --help --all' prints everything.
+Run 'amux <command> --help' for details. 'amux help --all' prints everything.

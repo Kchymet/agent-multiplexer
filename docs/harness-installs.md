@@ -234,7 +234,7 @@ rather than leave the session dead. GC keeps every version a process still
 executes, and the previous version, so the fallback target is normally still
 installed.
 
-`amux status` (on stderr) and `amux doctor` list each waiting session, e.g.
+`amux ls` (on stderr) and `amux doctor` list each waiting session, e.g.
 `a1b2c3 restart pending for harness update (claude 2.1.311 → 2.1.325): waiting
 for the agent to be idle (mid-turn or waiting on a permission prompt)`.
 

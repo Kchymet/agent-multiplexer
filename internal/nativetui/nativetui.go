@@ -671,7 +671,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "m": // move the selected agent into a new workgroup of its own (confirm first)
 		if s := m.selected(); s != nil && isAgent(s) && s.Section != core.SectionArchived {
 			m.confirm = &confirmState{
-				message: "Move " + s.Title + " into a new workgroup of its own?\n(limited to its repos; `amux workgroup move` targets an existing one)",
+				message: "Move " + s.Title + " into a new workgroup of its own?\n(limited to its repos; `amux move` targets an existing one)",
 				action:  core.Action{Action: core.ActionMove, ID: s.ID},
 			}
 			return m, nil

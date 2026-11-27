@@ -397,8 +397,8 @@ func Default(self string) *Daemon {
 	// Let the engine defer terminating a mid-turn agent on graceful shutdown until
 	// it is safe. The probe closes over d, so it must be set after d is built.
 	eng.SetActivity(d.instanceActivity)
-	// The direct listener is off unless `amux direct enable` saved it on; the
-	// supervisor then runs `amux direct serve --managed` as a child process.
+	// The direct listener is off unless `amux device enable` saved it on; the
+	// supervisor then runs `amux device serve --managed` as a child process.
 	// A child rather than in-process: internal/direct already depends on this
 	// package, and a fault in the network-facing TLS server must not take the
 	// agent engine down with it.
@@ -1731,7 +1731,7 @@ func (d *Daemon) restoreLiveAgents(ctx context.Context) {
 		}
 		if err := d.startAgent(ctx, k.AgentID, k); err != nil {
 			// The session stays stopped. Say so where its owner looks (the
-			// session journal and `amux status` reading "stopped"), not only in
+			// session journal and `amux ls` reading "stopped"), not only in
 			// the daemon log, so a stopped coordinator is not mistaken for idle.
 			log.Printf("restore agent %s: %v", k.AgentID, err)
 			journal(k.AgentID, core.JournalError, fmt.Sprintf("not restored after the daemon restart (%v); it is stopped, and a prompt starts it", err))

@@ -40,7 +40,7 @@ minutes. A failed listing never marks a PR closed.
 The last observation per session persists in the store (`session_prs`), so
 transitions are reported exactly once across daemon restarts.
 
-- `amux status --json` gives each member row a `prs` list
+- `amux ls --json` gives each member row a `prs` list
   (`harnessproto.SessionPR`: repo, number, url, branch, state
   `open|merged|closed`, draft, mergeable, mergeState, checks
   `pass|fail|pending`, failedChecks, reviewDecision, lastReview, updated, and
@@ -145,12 +145,12 @@ is distinguishable from idle.
 ## Coordinator status: the workgroup rollup
 
 `waiting` is the attention chip and means one thing everywhere — the rail,
-`amux status`, the snapshot web and Android read: **someone is blocked on the
+`amux ls`, the snapshot web and Android read: **someone is blocked on the
 user**. An idle agent is never waiting. A coordinator's row reflects the work
 it dispatched, not only its own turn. Its state is `enrich.Rollup`
 (`internal/enrich/rollup.go`), one pure function of the coordinator's own
 state, its goal, its members' states and their PRs, used by the rail,
-`amux status`, the direct API and the provider alike. First match wins:
+`amux ls`, the direct API and the provider alike. First match wins:
 
 1. **waiting on the user** — the coordinator has a prompt or question of its
    own, its goal needs the user while it is between turns (`input`, `blocked`,
@@ -177,7 +177,7 @@ The rollup itself is the row's `rollup` object (see
 [Session enrichments](session-enrichments.md)); `state` always stays on the
 attention ladder.
 
-`amux status --json` adds a `supervision` object to each active coordinator
+`amux ls --json` adds a `supervision` object to each active coordinator
 row: `ownState` (its own turn activity), `goal` and `goalNote`, `members`
 (the in-flight members: id, title, state, open-PR summary), `needsYou` (who is
 blocked on the user: member labels, and `coordinator`; non-empty exactly when

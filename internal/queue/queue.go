@@ -1,7 +1,7 @@
 // Package queue is the user question queue's vocabulary: one list of every
 // pending question for the user, from any session, with answers routed back to
 // the asking session. It also holds the workgroup summary the overseer and
-// `amux status --json` show (needs you / running / waiting for review or merge
+// `amux ls --json` show (needs you / running / waiting for review or merge
 // / done).
 //
 // Entries come in two lifetimes (docs/direct-console.md §4):

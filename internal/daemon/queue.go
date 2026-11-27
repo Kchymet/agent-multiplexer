@@ -503,7 +503,7 @@ func (d *Daemon) findQueueEntry(id string) (queue.Entry, bool) {
 func (d *Daemon) handleQueueAction(ctx context.Context, a core.Action) core.Result {
 	id := strings.TrimSpace(a.Fields[core.QueueEntryField])
 	if id == "" {
-		return fail("%s needs -f %s=<entry id> (amux queue list)", a.Action, core.QueueEntryField)
+		return fail("%s needs -f %s=<entry id> (amux inbox ls)", a.Action, core.QueueEntryField)
 	}
 	now := time.Now()
 	e, found := d.findQueueEntry(id)
@@ -516,7 +516,7 @@ func (d *Daemon) handleQueueAction(ctx context.Context, a core.Action) core.Resu
 		if d.queue.wasAnswered(id, now) {
 			return core.Result{Type: "result", Code: codeAnswered, Error: fmt.Sprintf("queue entry %s was already answered", id)}
 		}
-		return core.Result{Type: "result", Code: codeAskerGone, Error: fmt.Sprintf("queue entry %s is no longer open (the question was answered, replaced or its session went away); `amux queue list` shows what is open, and you can still prompt the session directly", id)}
+		return core.Result{Type: "result", Code: codeAskerGone, Error: fmt.Sprintf("queue entry %s is no longer open (the question was answered, replaced or its session went away); `amux inbox ls` shows what is open, and you can still prompt the session directly", id)}
 	}
 	if a.Action == core.ActionQueueRelease {
 		// Answer in the pane: hand a held Claude question back to its dialog.
@@ -590,7 +590,7 @@ func questionAnswer(e queue.Entry, f map[string]string) (a harnessproto.FormAnsw
 	switch {
 	case errors.Is(err, queue.ErrNeedsNewerClient):
 		return a, true, core.Result{Type: "result", Code: harnessproto.CodeNeedsNewerClient,
-			Error: fmt.Sprintf("queue entry %s needs a newer amux client to answer (amux question answer, or the latest web/Android app)", e.ID)}
+			Error: fmt.Sprintf("queue entry %s needs a newer amux client to answer (amux inbox answer, or the latest web/Android app)", e.ID)}
 	case err != nil:
 		if len(choices) == 0 && text == "" {
 			return a, true, fail("an answer needs -f %s=<label> or -f %s=<text>", core.QueueChoiceField, core.QueueTextField)

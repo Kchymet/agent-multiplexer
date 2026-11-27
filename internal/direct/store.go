@@ -12,7 +12,7 @@ import (
 )
 
 // ErrStoreBusy means another process owns the direct store (normally a running
-// `amux direct serve`); administer it through the admin channel instead.
+// `amux device serve`); administer it through the admin channel instead.
 var ErrStoreBusy = errors.New("direct store is owned by another process")
 
 // DefaultRoot is the direct state directory (core.DirectStateDir): resolved
@@ -22,7 +22,7 @@ func DefaultRoot() (string, error) { return core.DirectStateDir() }
 
 // ErrNoStore means no direct store exists yet; offline administration never
 // creates one.
-var ErrNoStore = errors.New("no direct store exists (run `amux direct serve` first)")
+var ErrNoStore = errors.New("no direct store exists (run `amux device serve` first)")
 
 // stateVersion is the grants.json schema. Version 2 added PKCE-bound cloud
 // enrollment codes and the cloud issuance policy. A version-1 reader (amux

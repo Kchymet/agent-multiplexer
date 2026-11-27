@@ -1,0 +1,25 @@
+amux harness auth — central logins: status, accounts, default, rebind, restart
+
+usage: amux harness auth <command>
+
+Run logins in a host terminal or the trusted amux console terminal. Other agent
+sessions cannot configure accounts. Sessions never hold a refresh token: Claude
+receives the setup-token through CLAUDE_CODE_OAUTH_TOKEN, and Codex receives
+short-lived ChatGPT tokens from the daemon. A setup-token is valid for one year
+and is not refreshed; run login again to reissue it before then. Reissuing
+does not revoke the previous token. Status never prints a secret.
+
+One amux-owned configuration is available for each harness. Every workload,
+including existing and archived ones, follows its harness's central
+configuration. Each new harness process uses the newest successfully
+configured login; running processes keep what they received and are never
+stopped by login.
+
+commands:
+  status [claude|codex]       show the amux-owned configuration and limits
+  accounts [--json]           view Claude/Codex configuration and limits
+  default <claude|codex>      confirm the central configuration (always the default)
+  rebind <claude|codex> <id>  stop one workload so it relaunches on the current login now
+  restart [--force]           restart idle Claude agents with current credentials (conversations resume)
+
+Run 'amux harness auth <command> --help' for details.

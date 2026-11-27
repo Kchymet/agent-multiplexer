@@ -115,7 +115,7 @@ func buildDriftFixture(tb testing.TB) driftFixture {
 }
 
 // runSummary is the production doctor/drift summary (DriftSummary, which
-// `amux doctor` and `amux sandbox drift` call after resolving agents through
+// `amux doctor` and `amux harness sandbox drift` call after resolving agents through
 // the daemon). The baseline before this change was the equivalent sequential
 // loop of Scan + Pending per agent.
 func runSummary(tb testing.TB, specs []Spec, workers int) (agents, edits int) {

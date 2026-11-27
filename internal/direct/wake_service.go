@@ -13,7 +13,7 @@ import (
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// WakeService runs direct wake-ups inside `amux direct serve`: the detector
+// WakeService runs direct wake-ups inside `amux device serve`: the detector
 // (events -> records), the leased outbox the provider drains, and the data
 // side of the direct wake API. It never holds the authority lock while doing
 // wake work, and a wake failure never reaches the authority.

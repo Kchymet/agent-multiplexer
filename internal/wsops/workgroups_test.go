@@ -94,7 +94,7 @@ func TestRetiredRepoAgentCannotCreateOrLaunch(t *testing.T) {
 		t.Fatalf("retired descriptor: %+v", desc)
 	}
 	id, err := ApplyResult(context.Background(), core.Action{Action: "new-repo-agent", ID: "api"})
-	if id != "" || err == nil || !strings.Contains(err.Error(), "removed") || !strings.Contains(err.Error(), "new-workgroup -f repos=api") || !strings.Contains(err.Error(), "amux workgroup repo api") {
+	if id != "" || err == nil || !strings.Contains(err.Error(), "removed") || !strings.Contains(err.Error(), "new-workgroup -f repos=api") || !strings.Contains(err.Error(), "--repo api") {
 		t.Fatalf("retired creation: %q %v", id, err)
 	}
 	db, err := store.Open()

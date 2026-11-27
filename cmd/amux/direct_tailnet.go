@@ -24,7 +24,7 @@ import (
 	"amux/internal/tailnet"
 )
 
-// Tailnet mode: `amux direct enable --tailnet` derives the listen address,
+// Tailnet mode: `amux device enable --tailnet` derives the listen address,
 // endpoint and certificate from this machine's tailnet identity (tailscaled's
 // LocalAPI) and saves them into the ordinary daemon-managed setting. The
 // daemon's supervised child stays the only owner of the listener: it
@@ -207,7 +207,7 @@ func prepareTailnet(ctx context.Context, fs *flag.FlagSet, t *tailnetFlags, s *d
 	} else {
 		origin, source, err := defaultOrchestratorOrigin()
 		if err != nil {
-			fmt.Fprintf(out, "origins   no default browser origin yet: %v\n          the Harness web origin is allowed once amux provide registers; or pass --allow-origin <exact origin of the Harness web app>\n", err)
+			fmt.Fprintf(out, "origins   no default browser origin yet: %v\n          the Harness web origin is allowed once amux cloud registers; or pass --allow-origin <exact origin of the Harness web app>\n", err)
 		} else {
 			tn.DefaultOrigin, tn.OriginSource = origin, source
 		}
@@ -365,7 +365,7 @@ var managedOwnsAddr = func(addr string) bool {
 }
 
 // applyTailnetServe completes cfg for a process about to serve in tailnet mode
-// (the managed child, or a manual `amux direct serve` from the saved setting
+// (the managed child, or a manual `amux device serve` from the saved setting
 // while the managed listener is off): it re-derives what is not explicit,
 // loads the certificate into a reloader, and returns the renewer to run for
 // as long as the listener does. A derivation failure is an error, so the
@@ -405,13 +405,13 @@ func applyTailnetServe(ctx context.Context, s directsvc.Settings, cfg *direct.Se
 	case tailnet.CertExplicit:
 		pair, i, err := tailnet.LoadPairFor(s.TLSCert, s.TLSKey, hosts, now)
 		if err != nil {
-			return nil, fmt.Errorf("load TLS certificate for the effective endpoint %s: %w (replace the certificate, or set the endpoint with amux direct enable --endpoint)", strings.Join(cfg.Endpoints, ", "), err)
+			return nil, fmt.Errorf("load TLS certificate for the effective endpoint %s: %w (replace the certificate, or set the endpoint with amux device enable --endpoint)", strings.Join(cfg.Endpoints, ", "), err)
 		}
 		r.Target, r.CertFile, r.KeyFile, r.Hosts, info = tailnet.NewReloader(pair), s.TLSCert, s.TLSKey, hosts, i
 	default:
 		for _, h := range hosts {
 			if h != node.DNSName {
-				return nil, fmt.Errorf("tailnet: endpoint host %s is not this node's MagicDNS name %s, the only name a tailnet certificate covers; pass --tls-cert and --tls-key (amux direct enable)", h, node.DNSName)
+				return nil, fmt.Errorf("tailnet: endpoint host %s is not this node's MagicDNS name %s, the only name a tailnet certificate covers; pass --tls-cert and --tls-key (amux device enable)", h, node.DNSName)
 			}
 		}
 		store := tailnetStore(node.DNSName)
@@ -464,7 +464,7 @@ func applyTailnetServe(ctx context.Context, s directsvc.Settings, cfg *direct.Se
 		// The address, endpoint and certificate name were derived once, at
 		// start. If the tailnet identity changes underneath, say so (status
 		// and log) rather than serve a silent mismatch; re-deriving means a
-		// restart, which goes through the supervisor (amux direct disable,
+		// restart, which goes through the supervisor (amux device disable,
 		// then enable) or happens at the daemon's next start.
 		t := time.NewTicker(directDriftInterval)
 		defer t.Stop()
@@ -482,7 +482,7 @@ func applyTailnetServe(ctx context.Context, s directsvc.Settings, cfg *direct.Se
 			case err != nil:
 				msg = "cannot re-read the tailnet identity: " + err.Error()
 			case n.DNSName != node.DNSName || (!tn.ListenExplicit && n.IP != node.IP):
-				msg = fmt.Sprintf("the tailnet now reports %s (%s) but this listener was derived for %s (%s); turn it off and on (amux direct disable && amux direct enable) to re-derive",
+				msg = fmt.Sprintf("the tailnet now reports %s (%s) but this listener was derived for %s (%s); turn it off and on (amux device disable && amux device enable) to re-derive",
 					n.DNSName, n.IP, node.DNSName, node.IP)
 			}
 			mu.Lock()
@@ -525,7 +525,7 @@ func settingsServeConfig(s directsvc.Settings) (direct.ServeConfig, error) {
 	return cfg, nil
 }
 
-// savedTailnetManualConfig is plain `amux direct serve` (no flags) with
+// savedTailnetManualConfig is plain `amux device serve` (no flags) with
 // tailnet mode saved. It never competes with the daemon: while the managed
 // listener is enabled the daemon owns this configuration and plain serve
 // refuses; while it is off, serve runs it in the foreground under the same
@@ -536,15 +536,15 @@ func savedTailnetManualConfig() (directsvc.Settings, error) {
 		return s, err
 	}
 	if !set || s.Tailnet == nil {
-		return s, errors.New("--listen is required (or save tailnet mode with amux direct enable --tailnet)")
+		return s, errors.New("--listen is required (or save tailnet mode with amux device enable --tailnet)")
 	}
 	if s.Enabled {
-		return s, errors.New("the daemon-managed listener is enabled and owns the saved configuration; see amux direct status (amux direct disable first to run it in the foreground)")
+		return s, errors.New("the daemon-managed listener is enabled and owns the saved configuration; see amux device status (amux device disable first to run it in the foreground)")
 	}
 	return s, nil
 }
 
-// directTailnetView is the tailnet part of `amux direct status`.
+// directTailnetView is the tailnet part of `amux device status`.
 type directTailnetView struct {
 	DNSName       string            `json:"dns_name,omitempty"`
 	Port          int               `json:"port"`

@@ -44,7 +44,7 @@ func accountSnapshotClient(c *daemon.Client) (hp.AccountSnapshot, error) {
 }
 func authAccounts(args []string) error {
 	if len(args) > 1 || (len(args) == 1 && args[0] != "--json") {
-		return fmt.Errorf("usage: amux auth accounts [--json]")
+		return fmt.Errorf("usage: amux harness auth accounts [--json]")
 	}
 	c, err := accountClient()
 	if err != nil {
@@ -61,7 +61,7 @@ func authAccounts(args []string) error {
 }
 func authAccountMutation(op string, args []string) error {
 	if len(args) < 1 || len(args) > 2 || (op == hp.AccountRebind && len(args) != 2) || (op != hp.AccountRebind && len(args) != 1) {
-		return fmt.Errorf("usage: amux auth %s <claude|codex> [workload-id]", op)
+		return fmt.Errorf("usage: amux harness auth %s <claude|codex> [workload-id]", op)
 	}
 	id := args[0]
 	if id == "claude" || id == "codex" {
@@ -214,7 +214,7 @@ func authMachineStatus(harness string) error {
 		}
 		fmt.Printf("%s configuration: %s (%s; mode %s)\nidentity: %s; plan: %s\nlimits: %s (%s)\n", harness, p.ID, p.State, p.Mode, p.Identity.State, p.Identity.Plan, p.Limits.State, p.Limits.Source)
 		if from := s.MigrationPending[harness]; from != "" {
-			fmt.Printf("Workloads migrated from the %s login follow this configuration; run amux auth login %s once.\n", from, harness)
+			fmt.Printf("Workloads migrated from the %s login follow this configuration; run amux harness login %s once.\n", from, harness)
 		}
 		printAccountLimits(p.Limits)
 		if p.Error != "" {

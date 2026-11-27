@@ -1,0 +1,31 @@
+amux device — phones and browsers that reach this machine directly (host only)
+
+usage: amux device <command>
+
+The device listener (the direct server) is an opt-in HTTPS listener on a
+private address. A phone or browser connects with a one-time code you paste or
+scan (connect --qr), then reaches this host's sessions with destination-issued
+credentials. No cloud service is in
+the path. See docs/direct-access.md.
+
+Disabling the managed listener is not revocation: clients stay enrolled and
+the cloud policy stays as it is. Use amux device revoke and amux cloud
+enroll disable for those.
+
+commands:
+  connect [flags]       connect a phone or browser: a one-time code to paste, or a QR code to scan
+  ls [--stale [--idle-days N]] [--json]
+                        list connected devices (enrolled clients), with any in-place grant changes
+  update <client-id> [--permissions <list>] [--all-sessions | --workgroup <id>...]
+                        change a device's permissions or scope in place (no reconnect needed)
+  revoke <client-id>    disconnect a device now (closes its streams first)
+  status [--json]       setting, managed listener, server and provider offer
+  enable [flags]        save the listener settings and turn it on (the daemon runs it from now on)
+  disable [--no-wait]   turn the managed listener off (settings, clients and cloud policy are kept)
+  logs [-n lines]       the managed listener's log
+  audit [--client <id>] [--limit N] [--json]
+                        answers, item triage and overseer steers made by direct clients (newest last)
+  serve [flags]         run the device listener in the foreground (manual)
+  reset-identity --yes  replace the server identity; revokes every client and disables cloud enrollment
+
+Run 'amux device <command> --help' for details.

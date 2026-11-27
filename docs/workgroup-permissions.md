@@ -91,8 +91,8 @@ ids, fields and environment variables only ever name a target
   never reaches an untracked repo. Visibility is separate from authority:
   `amux repo ls` always shows a coordinator every tracked repo, marking which
   are granted, but add-agent on an ungranted one is denied (`repo_not_granted`,
-  naming the repo and `amux workgroup grants`). The host adjusts an existing
-  workgroup at any time with `amux workgroup grants <id> [--all | --none |
+  naming the repo and `amux repo grant`). The host adjusts an existing
+  workgroup at any time with `amux repo grant <id> [--all | --none |
   repo...]` (`coordinator-set-repos`, `all=1` for all tracked); the change
   applies to the next add-agent, move or agent-set-repos without a restart.
   Changing grants and tracking or untracking repos are host-only.
@@ -155,7 +155,7 @@ member PR, and the archive answers the caller before its runtime is stopped
 (once the turn ends, or after a short grace). Treat the wrap-up rules as a
 behavioral contract the coordinator is bound to, enforced by
 its instructions and reviewable in its transcript, not by policy. The host can
-always restore a workgroup archived early (`amux workgroup unarchive <id>`).
+always restore a workgroup archived early (`amux unarchive <id>`).
 
 The same holds for open items: the guide has a coordinator triage its inbox,
 auto-archive only with nothing left open there, and otherwise ask, naming the

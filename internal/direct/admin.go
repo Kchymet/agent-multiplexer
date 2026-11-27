@@ -327,7 +327,7 @@ func Administer(a *Authority, endpoints []string, req AdminRequest) AdminRespons
 	switch req.Op {
 	case OpEnroll, OpEnrollTicket:
 		if len(endpoints) == 0 {
-			return fail(errors.New("enrollment needs a running `amux direct serve` with configured endpoints"))
+			return fail(errors.New("enrollment needs a running `amux device serve` with configured endpoints"))
 		}
 		ticket, b := false, Bundle{V: 1}
 		if req.Op == OpEnrollTicket {
@@ -416,7 +416,7 @@ func issueCloudCode(a *Authority, endpoints []string, req AdminRequest) AdminRes
 		return AdminResponse{Code: CloudErrInvalidRequest, Error: "issuance needs a request"}
 	}
 	if len(endpoints) == 0 {
-		return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance needs a running `amux direct serve` with configured endpoints"}
+		return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance needs a running `amux device serve` with configured endpoints"}
 	}
 	code, exp, err := a.IssueCloudCode(*req.Issue)
 	if err != nil {
@@ -483,7 +483,7 @@ func AdministerWake(ctx context.Context, a *Authority, ws *WakeService, req Admi
 		return status()
 	}
 	if ws == nil {
-		return fail(errors.New("wake-ups need a running `amux direct serve`"))
+		return fail(errors.New("wake-ups need a running `amux device serve`"))
 	}
 	switch req.Op {
 	case OpWakeLease:
@@ -580,7 +580,7 @@ func OfflineAdminister(ctx context.Context, root string, cred access.Credential,
 		return AdminResponse{}, errors.New("administration requires the host credential")
 	}
 	if req.Op == OpEnroll || req.Op == OpEnrollTicket || req.Op == OpIssueCloudCode {
-		return AdminResponse{}, errors.New("enrollment needs a running `amux direct serve` (it publishes the configured endpoints)")
+		return AdminResponse{}, errors.New("enrollment needs a running `amux device serve` (it publishes the configured endpoints)")
 	}
 	if err := verify(ctx, func(ch access.SocketChallenge) (access.SocketProof, error) {
 		return access.SignProof(cred, ch, rand.Reader)

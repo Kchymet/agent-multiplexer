@@ -25,11 +25,11 @@ import (
 // checked by name against the dispatch table, in both directions.
 func verbTables() map[string]map[string]bool {
 	return map[string]map[string]bool{
-		"auth":    verbNames(authSubcommands),
-		"daemon":  verbNames(daemonSubcommands),
-		"provide": verbNames(provideSubcommands),
-		"direct":  verbNames(directSubcommands),
-		"harness": verbNames(harnessSubcommands),
+		"harness auth": verbNames(authSubcommands),
+		"daemon":       verbNames(daemonSubcommands),
+		"cloud":        verbNames(cloudSubcommands),
+		"device":       verbNames(deviceSubcommands),
+		"harness":      verbNames(harnessSubcommands),
 	}
 }
 
@@ -113,7 +113,7 @@ func TestWorkgroupOpenNeedsAnID(t *testing.T) {
 	sandboxCLI(t)
 	err := runCommand(t, lookupCommand("workgroup"), []string{"open"})
 	if err == nil || !strings.Contains(err.Error(), "usage:") {
-		t.Errorf("`amux workgroup open` = %v, want a usage error", err)
+		t.Errorf("`amux open` = %v, want a usage error", err)
 	}
 }
 
@@ -122,7 +122,7 @@ func TestWorkgroupOpenNeedsAnID(t *testing.T) {
 // the tree: a direct call of the run function, not only through main.
 func TestNamespaceHelpWord(t *testing.T) {
 	sandboxCLI(t)
-	for _, name := range []string{"repo", "workgroup", "do", "config", "agent", "sandbox", "queue", "auth", "daemon", "provide", "direct", "harness"} {
+	for _, name := range []string{"repo", "workgroup", "do", "config", "agent", "inbox", "daemon", "cloud", "device", "harness"} {
 		c := lookupCommand(name)
 		for _, flag := range []string{"--help", "-h", "help"} {
 			out, err := captureOutput(t, func() error { return c.run([]string{flag}) })

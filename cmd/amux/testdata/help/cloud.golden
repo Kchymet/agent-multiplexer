@@ -1,0 +1,25 @@
+amux cloud — reach this machine through Harness cloud
+
+usage: amux cloud <command>
+
+The cloud connection (provider mode) dials out to Harness over TLS, registers
+this machine and serves agent panes over that one connection, so the Harness
+web dashboard and phone app reach it from anywhere. A registration owned by
+your account is your personal compute pool of kind "machine"; amux cloud
+status and amux doctor print its provider id. See docs/remote-provider.md.
+
+commands:
+  connect [flags]       connect this machine to Harness cloud: config file plus a user service (survives reboot)
+  status                the cloud connection: config, token, service, last registration and heartbeat
+  disconnect            stop and remove the user service (the config file is kept)
+  run [<orchestrator-addr>] [flags]
+                        run the cloud connection in the foreground (provider mode)
+  revoke --yes [flags]  permanently revoke this provider's broker registration and relay access
+  enroll <command>      let Harness cloud connect devices, up to a ceiling (off by default)
+  wake <command>        content-free cloud wake-ups for connected devices (opt-in)
+
+examples:
+  amux cloud connect --orchestrator orch.example.com:7443 --token-file ~/.config/amux/provider.token
+  amux cloud status
+
+Run 'amux cloud <command> --help' for details.

@@ -80,3 +80,16 @@ func TestRenderQuestion(t *testing.T) {
 		t.Fatalf("render = %s", short.String())
 	}
 }
+
+func TestInboxAnswerPicksFormFlags(t *testing.T) {
+	for _, args := range [][]string{{"--select", "1"}, {"--q=2", "-s", "a"}, {"--other", "x"}, {"-n", "why"}} {
+		if !isFormAnswer(args) {
+			t.Errorf("%q not read as a form answer", args)
+		}
+	}
+	for _, args := range [][]string{nil, {"--choice", "Yes"}, {"--allow"}, {"free", "text"}, {"-m", "hi"}} {
+		if isFormAnswer(args) {
+			t.Errorf("%q read as a form answer", args)
+		}
+	}
+}

@@ -392,7 +392,7 @@ var (
 )
 
 // ScanCache shares template snapshots across the scans of one run (one
-// `amux sandbox drift` or doctor check), keyed by the template's path, harness
+// `amux harness sandbox drift` or doctor check), keyed by the template's path, harness
 // kind and entry layout. Concurrent scans of the same template wait on a
 // single construction. It is a point-in-time view: create one per run, never
 // keep it across a Promote or Reset.

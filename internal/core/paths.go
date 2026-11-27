@@ -17,7 +17,7 @@ func StateDir() string {
 	return filepath.Join(home, ".local", "state", "amux")
 }
 
-// DirectStateDir holds `amux direct`'s identity, grant registry and admin
+// DirectStateDir holds `amux device`'s identity, grant registry and admin
 // socket. It resolves from the login account (ProtectedStateDir), never from
 // caller-controlled HOME/XDG, and lies inside the state directory that pane
 // sandboxes never mount, so no agent can read the registry or reach the admin

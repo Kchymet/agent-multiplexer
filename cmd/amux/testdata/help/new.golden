@@ -1,0 +1,27 @@
+amux new — start a workgroup (no args: the create form)
+
+usage: amux new ["<task>"] [flags]
+
+Creates a workgroup and hands <task> to its coordinator, which starts the
+member agents the task needs. With no repo the coordinator picks one or asks;
+--repo limits the workgroup to those repos and seeds a first member on them
+(idle until the coordinator steers it). With no arguments at all, the
+interactive create form opens (needs a terminal).
+
+Coordinators are interactive and members run as tasks; --interactive is the
+advanced override for that first member.
+
+flags:
+  --repo <name>                (repeatable) limit the workgroup to this tracked repo and seed a first member on it
+                               (repeat, or give a comma list)
+  --harness <harness>          the first member's harness: claude | codex (default: claude)
+  --model <model>              the first member's model (default: the harness's default)
+  --coordinator <harness>      the coordinator's harness: claude | codex (default: codex)
+  --coordinator-model <model>  the coordinator's model
+  --name <name>                workgroup display name
+  --interactive                advanced: the first member is interactive instead of a task
+
+examples:
+  amux new
+  amux new "upgrade CI to Go 1.26"
+  amux new "fix the flaky auth test" --repo api --harness codex

@@ -14,20 +14,20 @@ import (
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// cmdDirectWake is `amux direct wake enable|disable|status`: the host
+// cmdDirectWake is `amux cloud wake enable|disable|status`: the host
 // operator's opt-in for content-free cloud wake-ups
 // (docs/direct-wake-contract.md). Pins default from this host's live provider
-// registration, exactly like `amux direct cloud enable`.
+// registration, exactly like `amux cloud enroll enable`.
 func cmdDirectWake(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: amux direct wake enable [--owner <harness-user-id> --provider <provider-id>] | disable | status [--json]")
+		return errors.New("usage: amux cloud wake enable [--owner <harness-user-id> --provider <provider-id>] | disable | status [--json]")
 	}
 	switch args[0] {
 	case "enable":
-		fs := newCmdFlagSet("direct wake enable")
+		fs := newCmdFlagSet("cloud wake enable")
 		owner := fs.String("owner", "", "")
 		prov := fs.String("provider", "", "")
-		if err := parseCmdFlags(fs, "direct wake enable", args[1:]); err != nil {
+		if err := parseCmdFlags(fs, "cloud wake enable", args[1:]); err != nil {
 			return err
 		}
 		if fs.NArg() != 0 {
@@ -47,11 +47,11 @@ func cmdDirectWake(args []string) error {
 			return err
 		}
 		printWakeStatus(resp)
-		fmt.Println("restart `amux provide` with --direct-wake (or direct-wake = true) so it advertises wake-ups")
+		fmt.Println("restart `amux cloud run` with --direct-wake (or direct-wake = true) so it advertises wake-ups")
 		return nil
 	case "disable":
 		if len(args) != 1 {
-			return errors.New("usage: amux direct wake disable")
+			return errors.New("usage: amux cloud wake disable")
 		}
 		resp, err := adminRun(direct.AdminRequest{Op: direct.OpWakeDisable})
 		if err != nil {

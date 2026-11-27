@@ -28,7 +28,7 @@ import (
 //
 // The hold never costs the user Claude's own dialog. It is released — the
 // hook prints nothing and Claude draws the dialog — when someone types into
-// the agent's pane, when the user releases it (`amux question release`, the
+// the agent's pane, when the user releases it (`amux inbox release`, the
 // TUI focusing the pane, "answer in pane" in a client), at its deadline (below
 // both the hook's timeout and the user's askUserQuestionTimeout), when the
 // switch questions.claude_hold is off, or when the call cannot be held (an

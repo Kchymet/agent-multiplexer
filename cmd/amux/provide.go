@@ -23,42 +23,18 @@ import (
 // cmdProvide is the provider-mode namespace: run the provider in the
 // foreground, or install/uninstall it as a user service.
 //
-//	amux provide [<orchestrator-addr>] [flags]   run (reads the config file when bare)
-//	amux provide [flags] [<orchestrator-addr>]   the same run, flags on the other side
-//	amux provide install [flags]                 write the config + install the service
-//	amux provide uninstall                       remove the service
+//	amux cloud run [<orchestrator-addr>] [flags]   run (reads the config file when bare)
+//	amux cloud run [flags] [<orchestrator-addr>]   the same run, flags on the other side
+//	amux cloud connect [flags]                 write the config + install the service
+//	amux cloud disconnect                       remove the service
 //
 // Flags work on either side of the address (parseFlagsAnyOrder) — the first
 // phrasing above is the one people reach for, and it used to drop every flag
 // after the address without a word.
 //
 // Config resolves from flags, then the AMUX_PROVIDER_* / AMUX_TLS_* env vars,
-// then the config file `amux provide install` wrote. The token is never taken
+// then the config file `amux cloud connect` wrote. The token is never taken
 // from argv (a bearer credential): use --token-file or AMUX_PROVIDER_TOKEN.
-func cmdProvide(args []string) error {
-	sub := ""
-	if len(args) > 0 {
-		sub = args[0]
-	}
-	if isHelpFlag(sub) {
-		return showHelp("provide")
-	}
-	if run, ok := provideSubcommands[sub]; ok {
-		return run(args[1:])
-	}
-	return provideRun(args)
-}
-
-// provideSubcommands is the provider-mode verb dispatch. It is a table, like
-// daemonSubcommands, so the CLI contract test can check the advertised verbs by
-// name without running them — installing a system service is not something a
-// test should do for real.
-var provideSubcommands = map[string]func([]string) error{
-	"install":   cmdProvideInstall,
-	"uninstall": cmdProvideUninstall,
-	"revoke":    cmdProvideRevoke,
-}
-
 // provideFlags is the settings surface shared by running the provider and
 // installing it, so the flags mean exactly the same thing in both — the install
 // command is the run command with its arguments written down. It is a struct
@@ -115,15 +91,15 @@ func (f *provideFlags) register(fs *flag.FlagSet) {
 // docs/remote-provider.md.
 //
 // Settings resolve from flags, then the AMUX_PROVIDER_* / AMUX_TLS_* env vars,
-// then the config file `amux provide install` wrote — so a bare `amux provide`
+// then the config file `amux cloud connect` wrote — so a bare `amux cloud`
 // (what the user service runs) is fully configured by that file, while an ad-hoc
 // invocation can still override any single setting. The token is never taken
 // from argv (it is a bearer credential): use --token-file or AMUX_PROVIDER_TOKEN.
 func provideRun(args []string) error {
-	fs := newCmdFlagSet("provide")
+	fs := newCmdFlagSet("cloud run")
 	var f provideFlags
 	f.register(fs)
-	operands, err := parseCmdFlagsAnyOrder(fs, "provide", args)
+	operands, err := parseCmdFlagsAnyOrder(fs, "cloud run", args)
 	if err != nil {
 		return err
 	}
@@ -140,14 +116,14 @@ func provideRun(args []string) error {
 	}
 
 	// The address may come from either side of the flags, from --orchestrator, or
-	// — for the bare `amux provide` the user service runs — from the config file.
+	// — for the bare `amux cloud run` the user service runs — from the config file.
 	addr, err := provideAddr(f.orch, operands)
 	if err != nil {
 		return err
 	}
 	addr = firstNonEmpty(addr, file.Orchestrator)
 	if addr == "" {
-		return fmt.Errorf("provide: need an orchestrator address (positional, --orchestrator, or `amux provide install`)")
+		return fmt.Errorf("provide: need an orchestrator address (positional, --orchestrator, or `amux cloud connect`)")
 	}
 
 	tokenFile := firstNonEmpty(f.tokenFile, file.TokenFile)
@@ -187,7 +163,7 @@ func provideRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	logf := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "amux provide: "+format+"\n", a...) }
+	logf := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "amux cloud run: "+format+"\n", a...) }
 	cfg := provider.Config{
 		AccountStatus:     resolvedBool(fs, "account-status", f.accountStatus, "AMUX_PROVIDER_ACCOUNT_STATUS", file.AccountStatus),
 		AccountManage:     false, // legacy saved/env grants cannot enable remote configuration

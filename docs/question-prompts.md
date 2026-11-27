@@ -598,7 +598,7 @@ The status hook keeps reporting `waiting` (`claudecfg.go:616`). `hookCommand`
   (`engine/local/local.go:472`).
 - A TUI client focuses that session's pane. This needs a new
   `ActionQuestionRelease`, sent by `nativetui` on focus.
-- The user runs `amux question release <id>`, or presses "answer in pane" in
+- The user runs `amux inbox release <id>`, or presses "answer in pane" in
   any client.
 - `form.deadline` passes. That is `askUserQuestionTimeout` when the user set
   one, else never. A 24 h hook timeout bounds the process; the daemon
@@ -755,7 +755,7 @@ Shared rules:
 
 ### 5.3 Console / overseer queue
 
-- The host console and `amux queue` share the TUI view.
+- The host console and `amux inbox` share the TUI view.
 - The overseer's guide (`internal/wsops/overseer_guide.go`) learns `form`
   for curation (`suggested_answer` can name option indices) but never calls
   answer.
@@ -763,14 +763,17 @@ Shared rules:
 ### 5.4 CLI
 
 ```
-amux question list [--all] [--json]
-amux question show <id> [--json]          # every question, options, previews
-amux question answer <id> [--q <n|id|header>] [--select <label|n>]... \
-                          [--other <text>] [--note <text>] ...
-amux question cancel <id> [--message <text>]
-amux question release <id>                # hand the prompt back to the pane
+amux inbox questions [--all] [--json]
+amux inbox show <id> [--json]             # every question, options, previews
+amux inbox answer <id> [--q <n|id|header>] [--select <label|n>]... \
+                       [--other <text>] [--note <text>] ...
+amux inbox cancel <id> [--message <text>]
+amux inbox release <id>                   # hand the prompt back to the pane
 ```
 
+- The verbs live under `amux inbox` (#350). `amux question ...` is a
+  hidden legacy rewrite (`cmd/amux/legacy.go`) onto them; it is not a
+  command of its own.
 - `--q` starts a question group, and the flags after it apply to that
   question. It may be omitted for a one-question form.
 - `--select` matches the exact label first, then a 1-based index.
@@ -779,14 +782,17 @@ amux question release <id>                # hand the prompt back to the pane
 - Validation errors name the question and its options.
 - Exit codes: 0 delivered, 3 `answered`, 4 `asker_gone`, 5
   `delivery_failed`, 6 `needs_newer_client`.
-- `amux queue answer` stays as the legacy alias with its current flags
-  (`cmd/amux/queue.go:24-66`). It routes through §3.5.
+- `amux inbox answer` without the form flags keeps its `--choice`/`--text`
+  /`--allow`/`--deny` behaviour (`cmd/amux/queue.go`). It routes through §3.5.
+  Any of `--q`, `--select`, `--other` or `--note` selects the form answer.
+- `amux inbox dismiss` still only hides an entry here; `amux inbox cancel`
+  dismisses the question to the agent.
 
 Example:
 
 ```
-amux question answer q-k3v9x2m4pa --q Layout --select 1 --note "keep icons" \
-                                  --q Extras --select Search --select "Dark mode" --other "keyboard map"
+amux inbox answer q-k3v9x2m4pa --q Layout --select 1 --note "keep icons" \
+                               --q Extras --select Search --select "Dark mode" --other "keyboard map"
 ```
 
 ### 5.5 Web (harness)
@@ -851,7 +857,7 @@ amux question answer q-k3v9x2m4pa --q Layout --select 1 --note "keep icons" \
 | **A1 model + wire** | `queue.Form`/`FormAnswer`, `ValidateAnswer`, `LegacyProjection`, entry claim state; direct `form` caps/request/response; harnessproto feature, `SessionCaps.Question`, events, `VerbAnswer`; fixtures `docs/direct/fixtures/questions-v2/*.json` + golden tests; legacy mapping §3.5 (still delivered by today's typed path) | — |
 | **A2 Claude hold** | `amux agent question hold/wait`, hook install, release triggers + `ActionQuestionRelease`, structured delivery, resolution watcher (`question_resolved`), #316 interaction | A1 |
 | **A3 Codex structured** | method-name fix, full params, user-input tracker + answer/cancel, `acceptForSession`/`cancel` approval options | A1 |
-| **A4 TUI + CLI** | form view, `amux question …` | A1 (A2/A3 for live delivery) |
+| **A4 TUI + CLI** | form view, `amux inbox` question verbs | A1 (A2/A3 for live delivery) |
 | **A5 key fallback** | `composer.ReadQuestion`, verified driving per feature, captured Claude pane fixtures | A1, A2 |
 | A6 (phase 3) | Codex MCP elicitation | A3 |
 
@@ -1086,7 +1092,7 @@ Members pin to these.
   - **Released** (Claude draws its own dialog; the entry turns
     `delivery: pane`) on any of:
     - human input in the pane;
-    - host `queue-release` / `amux question release`;
+    - host `queue-release` / `amux inbox release`;
     - direct `POST /direct/v1/queue/{id}/release` (`{idem_key}`; steer
       permission; `capabilities.queue.form.release: true`);
     - the deadline: below the 1800 s hook timeout and the user's
@@ -1138,7 +1144,8 @@ Members pin to these.
 
     Text wraps with the shared helpers from #349 (`wrap.go`). Focusing an
     agent pane releases that session's held questions.
-  - **CLI.** `amux question list|show|answer|cancel|release` (§5.4).
+  - **CLI.** `amux inbox questions|show|answer|cancel|release` (§5.4);
+    `amux question ...` is only a hidden legacy rewrite onto them.
     Refusals exit 3 (`answered`), 4 (gone), 5 (`delivery_failed` /
     `answer_in_pane`) or 6 (`needs_newer_client`).
     `amux config set questions.claude_hold on|off` is the opt-out.
@@ -1146,3 +1153,7 @@ Members pin to these.
   is `delivery: pane`; a v2 answer gets `answer_in_pane`, and a legacy answer
   keeps the #316 typed reply. The sandbox could not run Claude or Codex to
   capture dialogs; the needed captures are listed in it-cc447d56.
+- **CLI under amux inbox** (no wire change): after #350 the question verbs
+  are `amux inbox questions|show|answer|cancel|release`, with the form flags
+  (`--q`, `--select`, `--other`, `--note`) on `amux inbox answer`.
+  `amux question ...` is kept only as a hidden legacy rewrite (it-bdb4d576).

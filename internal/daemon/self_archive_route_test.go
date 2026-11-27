@@ -12,7 +12,7 @@ import (
 // before the runtime is stopped (and only once its turn has ended or a grace
 // expires), never the ordinary dispatch, which stops the runtime before its
 // response. Both spellings the guide names — `amux agent done` and
-// `amux workgroup archive <own id>` — send this same action.
+// `amux archive <own id>` — send this same action.
 func TestCoordinatorSelfArchiveTakesCompletionPath(t *testing.T) {
 	self := access.Principal{Kind: access.SubjectSession, SubjectID: "wg1"}
 	archive := func(id string) core.Action {

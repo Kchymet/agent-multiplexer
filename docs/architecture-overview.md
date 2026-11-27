@@ -43,7 +43,7 @@ which also explains the Harness-side roles, registration and pooling.
 
 Harness web SPA / Android
           ↕ direct HTTPS (REST / WebSocket inventory / SSE transcript)
-amux direct serve (opt-in, destination-issued grants)
+amux device serve (opt-in, destination-issued grants)
           ↕ authenticated hostbackend operations
 Local amux daemon (inventory, prompt/stop, runtime-record resolution)
 ```
@@ -61,7 +61,7 @@ server reads resolved transcripts locally.
   [Agent CLI access and authorization](agent-cli-sandbox.md). What a
   workgroup's coordinator and members may do over that RPC is mapped in
   [Workgroup permissions](workgroup-permissions.md).
-- **The provider link is optional and outbound.** `amux provide` dials the
+- **The provider link is optional and outbound.** `amux cloud` dials the
   Harness broker over one long-lived TLS connection and serves the published
   `harnessproto` v2 protocol on it: spawn, input, resize and kill commands come
   down; pane output, exit, session inventory and runtime events go back up. The
@@ -83,7 +83,7 @@ server reads resolved transcripts locally.
 - **The compute-pool registry is two surfaces, not one service.** On the
   Harness control API it is the pool catalog, enrollment tokens and placement
   requests (`pool.*` and `provider.*` actions; the catalog lives in Harness's
-  Postgres). On the amux side it is `amux provide`: the daemon presents the
+  Postgres). On the amux side it is `amux cloud`: the daemon presents the
   enrollment token to the broker over TLS, advertises labels, features and the
   harnesses it can run, and receives agents scheduled onto it over the joined
   request / schedule agent path. The `compute` flag in that registration is

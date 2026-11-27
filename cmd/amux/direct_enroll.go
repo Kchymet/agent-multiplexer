@@ -15,7 +15,7 @@ import (
 
 // directEnrollExample is a complete, working enroll command line, quoted in
 // errors so a refused invocation always shows one that would work.
-const directEnrollExample = "amux direct enroll --label phone --permissions read"
+const directEnrollExample = "amux device connect --label phone --permissions read"
 
 // enrollEnv is everything enroll touches outside its arguments, so tests can
 // drive it without a terminal, a daemon or a direct server.
@@ -57,7 +57,7 @@ type enrollFlags struct {
 
 func parseEnrollFlags(args []string) (enrollFlags, error) {
 	var f enrollFlags
-	fs := newCmdFlagSet("direct enroll")
+	fs := newCmdFlagSet("device connect")
 	fs.StringVar(&f.label, "label", "", "")
 	fs.StringVar(&f.perms, "permissions", "", "")
 	fs.BoolVar(&f.all, "all-sessions", false, "")
@@ -68,7 +68,7 @@ func parseEnrollFlags(args []string) (enrollFlags, error) {
 	fs.StringVar(&f.qrPNG, "qr-png", "", "")
 	fs.BoolVar(&f.replace, "replace", false, "")
 	fs.Var(&f.groups, "workgroup", "")
-	if err := parseCmdFlags(fs, "direct enroll", args); err != nil {
+	if err := parseCmdFlags(fs, "device connect", args); err != nil {
 		return f, err
 	}
 	if fs.NArg() != 0 {
@@ -163,7 +163,7 @@ func resolveEnrollGrant(f enrollFlags, env enrollEnv) (enrollGrant, error) {
 func runDirectEnroll(args []string, env enrollEnv) error {
 	for _, a := range args {
 		if a == "-h" || a == "-help" || a == "--help" {
-			printHelp(env.stdout, mustHelpNode("direct enroll"))
+			printHelp(env.stdout, mustHelpNode("device connect"))
 			return nil
 		}
 	}
@@ -219,7 +219,7 @@ func runDirectEnroll(args []string, env enrollEnv) error {
 	if err != nil {
 		discardPNG()
 		if ticket && strings.Contains(err.Error(), "unknown admin operation") {
-			return errors.New("the running direct server predates QR enrollment; restart it (amux direct disable && amux direct enable) and retry")
+			return errors.New("the running direct server predates QR enrollment; restart it (amux device disable && amux device enable) and retry")
 		}
 		return err
 	}

@@ -9,7 +9,7 @@ import (
 	"amux/internal/sessionrpc"
 )
 
-// `amux workgroup move` sends the move action and, with no target, nothing but
+// `amux move` sends the move action and, with no target, nothing but
 // the agent — the daemon makes the new workgroup and reports its id.
 func TestWorkgroupMoveSendsMoveAction(t *testing.T) {
 	body, _ := json.Marshal(core.Result{Type: "result", OK: true, NewID: "fresh"})
@@ -51,7 +51,7 @@ func TestDoRejectsRetiredOneOffVerb(t *testing.T) {
 	}
 }
 
-// `workgroup ls` shows each workgroup's repository ceiling, so a workgroup
+// `amux ls` shows each workgroup's repository ceiling, so a workgroup
 // limited to one repo reads as such; a legacy coordinator with no ceiling
 // shows none rather than a guess.
 func TestGrantsTag(t *testing.T) {
@@ -82,7 +82,7 @@ func TestHelpHasNoOneOffVocabulary(t *testing.T) {
 			t.Errorf("help still says %q", banned)
 		}
 	}
-	for _, want := range []string{"repo <repo> [flags]", "a workgroup limited to one repo", "move an agent into another workgroup, or a new one"} {
+	for _, want := range []string{"--repo <name>", "limit the workgroup to this tracked repo", "move an agent into another workgroup, or a new one"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help lacks %q", want)
 		}

@@ -13,7 +13,7 @@ import (
 	"github.com/boombuler/barcode/qr"
 )
 
-// QR output for `amux direct enroll --qr / --qr-png`. The encoded text is an
+// QR output for `amux device connect --qr / --qr-png`. The encoded text is an
 // enrollment secret: nothing here logs it, and errors never include it.
 
 // qrQuietZone is the light border around the symbol, in modules (ISO/IEC

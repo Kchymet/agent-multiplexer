@@ -7,7 +7,7 @@ fields (-f key=value, repeatable):
   prompt=<text>              the coordinator's task (its goal on the default runtime); never copied to a member
   repos=<a,b>                repos the workgroup is limited to (its grant ceiling); naming any also creates
                              a first member agent on them (one repo = a single-repo workgroup)
-  agent=<harness>            first member's harness: claude | codex (default claude)
+  harness=<harness>          first member's harness: claude | codex (default claude; agent= is the old key)
   model=<model>              first member's model (default: its harness's default)
   mode=<mode>                first member's mode: task | interactive (default task)
   coordinator=<harness>      coordinator runtime: claude | codex (default codex, the native goal runtime;

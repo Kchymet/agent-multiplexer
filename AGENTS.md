@@ -25,5 +25,8 @@ it short. Put details in `docs/` and link them from here.
 
 - One PR per change; the maintainer merges (no auto-merge). CI minutes are
   limited: push as few times as possible.
-- CLI help: `amux help --all` (or `amux --help-all`) prints the entire command
-  tree in one call.
+- CLI help: `amux help --all` (or `amux --all-help`) prints the entire command
+  tree in one call. The tree is `cmd/amux/helptree*.go`: plain verbs for
+  everyday work (new, ls, open, send, add, archive), nouns for management.
+  When you rename a command, keep the old spelling working as a rewrite in
+  `cmd/amux/legacy.go` (it also prints the new spelling on a terminal only).

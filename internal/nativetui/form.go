@@ -40,7 +40,6 @@ func (m *model) openAddAgentForm(rootID, rootTitle string) {
 		fields: []*formField{
 			{key: "prompt", label: "Prompt"},
 			{key: "repos", label: "Repos", picker: true},
-			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeInteractive}},
 			harnessField(),
 			modelField(agent.DefaultKind()),
 		},

@@ -55,9 +55,9 @@ func (e *OpenPRError) Error() string {
 	b.WriteString("  finish them first: babysit each PR until it merges, or close it. To proceed anyway\n")
 	b.WriteString("  (the PR stays open with no agent behind it), the host or the workgroup coordinator can force:\n")
 	if e.Verb == "delete" {
-		fmt.Fprintf(&b, "    amux workgroup rm %s --force", e.ID)
+		fmt.Fprintf(&b, "    amux rm %s --force", e.ID)
 	} else {
-		fmt.Fprintf(&b, "    amux workgroup archive %s --force   (or: amux do set-archived %s -f archived=true -f force=true)", e.ID, e.ID)
+		fmt.Fprintf(&b, "    amux archive %s --force   (or: amux do set-archived %s -f archived=true -f force=true)", e.ID, e.ID)
 	}
 	return b.String()
 }

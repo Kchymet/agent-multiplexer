@@ -218,7 +218,7 @@ func TestOpenPRGuardRefusesDelete(t *testing.T) {
 		stopped := false
 		_, err := Dispatch(context.Background(), core.Action{Action: verb, ID: "wg"}, func(string) { stopped = true })
 		var open *OpenPRError
-		if !errors.As(err, &open) || open.Verb != "delete" || !strings.Contains(err.Error(), "amux workgroup rm wg --force") {
+		if !errors.As(err, &open) || open.Verb != "delete" || !strings.Contains(err.Error(), "amux rm wg --force") {
 			t.Fatalf("%s with open PR: %v", verb, err)
 		}
 		if stopped {

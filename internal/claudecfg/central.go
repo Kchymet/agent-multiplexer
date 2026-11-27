@@ -159,14 +159,14 @@ func LaunchAuthError(sp cfghome.Spec, projectDir string, environ []string) error
 	case amuxcfg.AuthCentral:
 		st, err := centralauth.ClaudeStore().Status()
 		if err != nil {
-			return fmt.Errorf("amux Claude central credential unusable: %w; run `amux auth login` on the host", err)
+			return fmt.Errorf("amux Claude central credential unusable: %w; run `amux harness login` on the host", err)
 		}
 		if !st.Configured {
-			return fmt.Errorf("%w: run `amux auth login claude` on the host to create one central Claude login for all sessions", ErrCentralLoginRequired)
+			return fmt.Errorf("%w: run `amux harness login claude` on the host to create one central Claude login for all sessions", ErrCentralLoginRequired)
 		}
 		if conflicts := CentralConflicts(sp, projectDir, environ); len(conflicts) > 0 {
 			return fmt.Errorf("%s would override or redirect the central Claude login; remove it, "+
-				"or use `amux auth login claude --api-key` for an API key", strings.Join(conflicts, ", "))
+				"or use `amux harness login claude --api-key` for an API key", strings.Join(conflicts, ", "))
 		}
 	}
 	return nil

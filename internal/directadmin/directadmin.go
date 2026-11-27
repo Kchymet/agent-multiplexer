@@ -94,7 +94,7 @@ func UpdateClient(ctx context.Context, u direct.GrantUpdate, actor string) (dire
 	}
 	if err != nil {
 		if resp.Error != "" && resp.Error == "unknown admin operation \""+direct.OpUpdate+"\"" {
-			return direct.GrantUpdateResult{}, errors.New("the running direct server predates grant updates; restart it (amux direct disable && amux direct enable) and retry")
+			return direct.GrantUpdateResult{}, errors.New("the running direct server predates grant updates; restart it (amux device disable && amux device enable) and retry")
 		}
 		return direct.GrantUpdateResult{}, err
 	}

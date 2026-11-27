@@ -31,7 +31,7 @@ Each call parks in the daemon (at most 25 s per round trip, re-armed with an
 opaque token so no change between round trips is missed) and returns the
 moment the session moves. Nothing sleeps or polls on either side.
 
-Use `amux status --json` for the scope-filtered session inventory (see
+Use `amux ls --json` for the scope-filtered session inventory (see
 [control-API scopes](agent-cli-sandbox.md#control-api-scopes)). Ordinary
 workers are self-only; repo-home and coordinator reads are checked against the
 daemon's current authoritative membership. Deleted, removed, foreign, and

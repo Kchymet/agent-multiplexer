@@ -16,7 +16,8 @@ import (
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// `amux question` answers agents' structured questions (docs/question-prompts.md
+// The amux inbox question verbs (questions, show, answer with form flags,
+// cancel, release) answer agents' structured questions (docs/question-prompts.md
 // §5.4) with every feature of the harness's own dialog: per-question
 // selections, "Other" free text, notes, dismissal with or without a reply, and
 // handing a held question back to the pane.
@@ -38,55 +39,59 @@ type codedError struct {
 func (e *codedError) Error() string { return e.msg }
 func (e *codedError) ExitCode() int { return e.code }
 
-func cmdQuestion(args []string) error {
-	if len(args) == 0 {
-		args = []string{"list"}
+// isFormAnswer reports whether inbox answer's flags are the form ones
+// (--q, --select, --other, --note) rather than --choice/--text/--allow/--deny.
+func isFormAnswer(args []string) bool {
+	for _, a := range args {
+		name, _, _ := strings.Cut(a, "=")
+		switch name {
+		case "--q", "--question", "--select", "-s", "--other", "-o", "--note", "-n":
+			return true
+		}
 	}
-	sub, rest := args[0], args[1:]
-	switch sub {
-	case "list", "ls":
-		return questionList(rest, os.Stdout)
-	case "show":
-		return questionShow(rest, os.Stdout)
-	case "answer":
-		if len(rest) < 1 {
-			return usageErr("question answer")
-		}
-		e, err := findQuestion(rest[0])
-		if err != nil {
-			return err
-		}
-		a, err := parseQuestionAnswer(*e.Form, rest[1:], os.Stdin)
-		if err != nil {
-			return err
-		}
-		return sendQuestionAnswer(e.ID, a, "answered "+e.ID)
-	case "cancel", "dismiss":
-		if len(rest) < 1 {
-			return usageErr("question cancel")
-		}
-		msg := ""
-		for i := 1; i < len(rest); i++ {
-			switch {
-			case (rest[i] == "--message" || rest[i] == "-m") && i+1 < len(rest):
-				i++
-				msg = rest[i]
-			case strings.HasPrefix(rest[i], "--message="):
-				msg = strings.TrimPrefix(rest[i], "--message=")
-			default:
-				return usagef("unknown argument %q", rest[i])
-			}
-		}
-		return sendQuestionAnswer(rest[0], harnessproto.FormAnswer{Version: harnessproto.FormVersion, Action: harnessproto.FormActionCancel, Message: msg}, "dismissed "+rest[0])
-	case "release":
-		if len(rest) != 1 {
-			return usageErr("question release")
-		}
-		return questionHostResult(core.Action{Action: core.ActionQueueRelease, Fields: map[string]string{core.QueueEntryField: rest[0]}}, "released "+rest[0]+" to the agent's pane")
-	case "help", "-h", "--help":
-		return showHelp("question")
+	return false
+}
+
+// inboxFormAnswer answers a question entry with the form flags.
+func inboxFormAnswer(id string, args []string) error {
+	e, err := findQuestion(id)
+	if err != nil {
+		return err
 	}
-	return usagef("unknown question subcommand %q", sub)
+	a, err := parseQuestionAnswer(*e.Form, args, os.Stdin)
+	if err != nil {
+		return err
+	}
+	return sendQuestionAnswer(e.ID, a, "answered "+e.ID)
+}
+
+// inboxCancel dismisses a question to the agent, optionally with a reply
+// (unlike inbox dismiss, which only hides the entry here).
+func inboxCancel(rest []string) error {
+	if len(rest) < 1 {
+		return usageErr("inbox cancel")
+	}
+	msg := ""
+	for i := 1; i < len(rest); i++ {
+		switch {
+		case (rest[i] == "--message" || rest[i] == "-m") && i+1 < len(rest):
+			i++
+			msg = rest[i]
+		case strings.HasPrefix(rest[i], "--message="):
+			msg = strings.TrimPrefix(rest[i], "--message=")
+		default:
+			return usagef("unknown argument %q", rest[i])
+		}
+	}
+	return sendQuestionAnswer(rest[0], harnessproto.FormAnswer{Version: harnessproto.FormVersion, Action: harnessproto.FormActionCancel, Message: msg}, "dismissed "+rest[0])
+}
+
+// inboxRelease hands a held Claude question back to the agent's pane.
+func inboxRelease(rest []string) error {
+	if len(rest) != 1 {
+		return usageErr("inbox release")
+	}
+	return questionHostResult(core.Action{Action: core.ActionQueueRelease, Fields: map[string]string{core.QueueEntryField: rest[0]}}, "released "+rest[0]+" to the agent's pane")
 }
 
 // questions lists the open question entries that carry a form.
@@ -114,7 +119,7 @@ func findQuestion(id string) (queue.Entry, error) {
 			return e, nil
 		}
 	}
-	return queue.Entry{}, &codedError{msg: fmt.Sprintf("no open question %s (`amux question list` shows what is open)", id), code: exitAskerGone}
+	return queue.Entry{}, &codedError{msg: fmt.Sprintf("no open question %s (`amux inbox questions` shows what is open)", id), code: exitAskerGone}
 }
 
 func questionList(args []string, w io.Writer) error {
@@ -157,7 +162,7 @@ func questionList(args []string, w io.Writer) error {
 
 func questionShow(args []string, w io.Writer) error {
 	if len(args) < 1 {
-		return usageErr("question show")
+		return usageErr("inbox show")
 	}
 	e, err := findQuestion(args[0])
 	if err != nil {
@@ -240,9 +245,9 @@ func renderQuestion(w io.Writer, e queue.Entry, full bool) {
 		}
 	}
 	if f.Delivery != harnessproto.DeliveryPane {
-		fmt.Fprintf(w, "  answer: amux question answer %s --q 1 --select 1 ...", e.ID)
+		fmt.Fprintf(w, "  answer: amux inbox answer %s --q 1 --select 1 ...", e.ID)
 		if f.Cancel {
-			fmt.Fprintf(w, "   dismiss: amux question cancel %s [--message <text>]", e.ID)
+			fmt.Fprintf(w, "   dismiss: amux inbox cancel %s [--message <text>]", e.ID)
 		}
 		fmt.Fprintln(w)
 	}
@@ -429,7 +434,7 @@ func sendQuestionAnswer(id string, a harnessproto.FormAnswer, done string) error
 // maps a refusal's code to its exit code.
 func questionHostResult(a core.Action, done string) error {
 	if sessionContextRestricted() {
-		return errors.New("only the user answers questions: run `amux question` in your own terminal (or press i in the TUI)")
+		return errors.New("only the user answers questions: run `amux inbox` in your own terminal (or press i in the TUI)")
 	}
 	res, err := sendHostResult(a)
 	if err != nil {

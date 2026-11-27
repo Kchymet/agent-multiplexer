@@ -1,9 +1,9 @@
 # amux as a remote compute provider
 
-Status: Implemented. `amux provide` (package `internal/provider`) drives the v2
+Status: Implemented. `amux cloud` (package `internal/provider`) drives the v2
 protocol end to end.
 
-`amux provide install` runs it as a user service (systemd on Linux/WSL2, launchd
+`amux cloud connect` runs it as a user service (systemd on Linux/WSL2, launchd
 on macOS) from a config file, and `amux doctor` reports it — see
 [User-service setup](#user-service-setup) below.
 
@@ -14,7 +14,7 @@ version negotiation and a constant-time token check, and — in `internal/provid
 — the dial-out FSM, jittered exponential reconnect/backoff, per-pane replay
 buffers (4 MiB cap / 256 KiB keep-tail + `reset`), pane survival across
 disconnects within the grace window, `PaneOffer`/`AdoptPane` resume with
-`afterSeq` replay, and the ping/pong heartbeat. See the `amux provide` command
+`afterSeq` replay, and the ping/pong heartbeat. See the `amux cloud` command
 under "Provider mode UX" below.
 
 amux's harness already runs pane execution behind a protocol
@@ -34,11 +34,11 @@ knowledge of, or code for, any particular orchestrator.
 
 This section describes **Harness** as the orchestrator. Harness's user-facing
 unit of scheduling and ownership is a **compute pool**, and a machine registered
-with `amux provide` under your own account is one kind of pool:
+with `amux cloud` under your own account is one kind of pool:
 
 | Pool | Owner | How it comes to exist |
 | --- | --- | --- |
-| **Machine** (`kind=machine`) | the person whose account owns the registration | `amux provide` registers this host; an owned, non-revoked registration **is** the pool |
+| **Machine** (`kind=machine`) | the person whose account owns the registration | `amux cloud` registers this host; an owned, non-revoked registration **is** the pool |
 | Grouped provider pool | a person | created on Harness from several of that person's own machines |
 | Organization pool | an organization | created and managed on Harness |
 | Global (paid) pool | — | reserved; unavailable until billing and budgets are designed |
@@ -232,13 +232,13 @@ a possible future extension, not part of v2.
 From a host terminal, use the provider's saved transport configuration:
 
 ```sh
-amux provide revoke --yes
+amux cloud revoke --yes
 ```
 
 This permanently revokes the broker registration identified by the configured
 provider token, including its relay access. **Existing direct-client grants
 remain valid.** They are destination-issued credentials, independent of Harness
-registration; use `amux direct clients list` and `amux direct clients revoke
+registration; use `amux device ls` and `amux device revoke
 <client-id>` separately to revoke those. Local agent-session credentials and
 central Claude/Codex logins are also independent.
 
@@ -272,7 +272,7 @@ cannot revoke its replacement. Broker rejection details are limited to known
 error codes so an echoed credential cannot leak into terminal output.
 
 Config, token files, and service installation are retained, including on failure.
-Use `amux provide uninstall` separately to stop/remove the service; uninstall
+Use `amux cloud disconnect` separately to stop/remove the service; uninstall
 alone does **not** revoke the remote registration. Registering again requires a
 new broker-issued credential. No local migration is needed; upgrade the broker
 to support this exchange before using the new command. An older broker is never
@@ -318,7 +318,7 @@ chmod 600 ~/.config/amux/provider.token
 # Do not overwrite an existing token or put the token itself in shell history.
 
 # 2. write the config and install the service
-amux provide install --orchestrator orch.example.com:7443 \
+amux cloud connect --orchestrator orch.example.com:7443 \
                      --token-file ~/.config/amux/provider.token \
                      --name laptop --label zone=home \
                      --allow-compute=false --publish-sessions=false \
@@ -337,9 +337,9 @@ Pass the certificate with `--ca /path/to/ca.pem`; never copy its private key or
 disable TLS verification. Use `--server-name` only for the identity the server's
 certificate actually covers.
 
-`amux provide install` writes `~/.config/amux/provider.toml` and the service
-unit; `amux provide uninstall` stops and removes the service (the config file and
-token are kept, so reinstalling is one command). `amux provide` with no arguments
+`amux cloud connect` writes `~/.config/amux/provider.toml` and the service
+unit; `amux cloud disconnect` stops and removes the service (the config file and
+token are kept, so reinstalling is one command). `amux cloud run` with no arguments
 reads the config file — that is exactly what the service runs.
 
 **The token is never in the config file or in argv.** The config names the *path*
@@ -358,7 +358,7 @@ checking it.
 `install` takes the address positionally too, with flags on either side of it,
 exactly as running the provider does.
 
-Re-running `install` merges over the existing config, so `amux provide install
+Re-running `install` merges over the existing config, so `amux cloud connect
 --name box` changes one setting and keeps the rest, and re-running it after
 `make install` re-points the service at the new binary and restarts it.
 `--dry-run` prints the config and the unit without writing either.
@@ -371,7 +371,7 @@ terminal closes — the exact failure the service was meant to prevent:
 loginctl enable-linger $USER
 ```
 
-`amux provide install` and `amux doctor` both say so when it is off. WSL2 also
+`amux cloud connect` and `amux doctor` both say so when it is off. WSL2 also
 needs systemd itself turned on — put
 
 ```ini
@@ -385,7 +385,7 @@ the user bus is not reachable.
 ### The config file
 
 ```toml
-# ~/.config/amux/provider.toml — written by `amux provide install`
+# ~/.config/amux/provider.toml — written by `amux cloud connect`
 orchestrator = "orch.example.com:7443"
 token-file = "/home/you/.config/amux/provider.token"
 name = "laptop"
@@ -400,14 +400,14 @@ features = ["bigdisk", "cuda"]
 zone = "home"
 ```
 
-The keys are the `amux provide` flag names verbatim, so the file reads like the
+The keys are the `amux cloud run` flag names verbatim, so the file reads like the
 command line it replaces. amux reads the subset of TOML it writes: a key it does
 not recognize is an error you see, never a setting silently dropped.
 
 ### Running it by hand
 
 ```
-amux provide orch.example.com:7443 \
+amux cloud run orch.example.com:7443 \
              --token-file ~/.config/amux/provider.token \
              --label zone=home --label gpu=none \
              --feature cuda --feature bigdisk \
@@ -418,8 +418,8 @@ amux provide orch.example.com:7443 \
 
 The orchestrator address is the positional argument (or `--orchestrator`); a
 `tls:` scheme prefix is accepted and stripped (provider mode is always TLS).
-Flags may come before or after the address — `amux provide host:7443 --ca ca.pem`
-and `amux provide --ca ca.pem host:7443` are the same command. Giving the address
+Flags may come before or after the address — `amux cloud run host:7443 --ca ca.pem`
+and `amux cloud run --ca ca.pem host:7443` are the same command. Giving the address
 twice, or leaving a stray word on the line, is an error rather than a silent
 choice — a flag that goes unread surfaces much later as something else entirely
 (an unread `--ca` looks exactly like a bad certificate).
@@ -444,22 +444,22 @@ Configuration resolves from flags first, then these env vars (matching amux's
 | TLS server name | `--server-name` | `AMUX_TLS_SERVERNAME` |
 
 Flags and env vars merge for labels and features (flags win on conflict), and the
-config file supplies whatever neither set — so the service's bare `amux provide`
+config file supplies whatever neither set — so the service's bare `amux cloud run`
 is fully configured by the file, while an ad-hoc run can still override any one
 setting.
 
 ### Status file and doctor
 
-Use `amux doctor` for status. There is no `amux provide status` or `restart`
+Use `amux doctor` for status. There is no `amux cloud status` or `restart`
 subcommand: an unrecognized positional word is interpreted as an orchestrator
 address. To restart the user service after a binary or token change, re-run
-`amux provide install` with its existing configuration. Token contents are read
+`amux cloud connect` with its existing configuration. Token contents are read
 when the provider starts; replacing the file does not update a running process.
 
 The provider loop writes `~/.local/state/amux/provider-status.json` on every
-state change. It is single-writer: `amux provide` holds an exclusive lock on
+state change. It is single-writer: `amux cloud` holds an exclusive lock on
 `provider-status.json.lock` while it runs, and a second provider on the host
-exits with `another amux provide is already running on this host (pid N)`.
+exits with `another amux cloud run (provider) is already running on this host (pid N)`.
 The states are `dialing` → `registered` → `disconnected`/`rejected`/`stopped`,
 plus the negotiated `providerId`, the registered owner Harness reported
 (`owner_user_id`, and `owner_email` for display), the last successful
@@ -508,7 +508,7 @@ not treated as a failure. The provider logs one summary line — again only when
 the result changes across reconnects — such as:
 
 ```
-amux provide: harnesses: advertising claude (2.1.0), codex (codex-cli 0.9.0); not installed (optional, skipped): hermes
+amux cloud: harnesses: advertising claude (2.1.0), codex (codex-cli 0.9.0); not installed (optional, skipped): hermes
 ```
 
 An installed CLI that fails its version check, or an allowlisted (`--harness`)
@@ -517,7 +517,7 @@ harness that is missing, is listed under `unavailable:` instead.
 Restrict discovery when a provider should accept only selected runtimes:
 
 ```
-amux provide install --orchestrator orch.example.com:7443 \
+amux cloud connect --orchestrator orch.example.com:7443 \
                      --token-file ~/.config/amux/provider.token \
                      --harness claude --harness codex
 ```
@@ -534,7 +534,7 @@ existing configuration on the physical provider machine. It is a credential
 source, not the pool kind — every amux provider advertises it. The
 registration never includes an account, organization, API key, or other
 credential identity. `api-key` is a separate cloud-provider identity mode, not
-valid for `amux provide`.
+valid for `amux cloud`.
 
 At creation, the orchestrator sends the selected harness as the lifecycle
 action's `agent` field and may include `identity_mode` (`machine` when omitted).

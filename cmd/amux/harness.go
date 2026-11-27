@@ -34,6 +34,10 @@ var harnessSubcommands = map[string]func([]string) error{
 	"gc":        harnessGC,
 	"uninstall": harnessUninstall,
 	"adopt":     harnessAdopt,
+	"login":     authLogin,
+	"logout":    func(a []string) error { return authAccountMutation("logout", a) },
+	"auth":      cmdAuth,
+	"sandbox":   cmdSandbox,
 }
 
 // cmdHarnessCLI manages amux-owned standalone installs of Claude Code / Codex.

@@ -1,0 +1,22 @@
+amux send — message an agent or workgroup (queued if busy; --now / --stop)
+
+usage: amux send <id> "<text>" [--now | --stop]
+
+<id> is an agent id, or a workgroup id to reach its coordinator. By default the
+text is a new prompt: delivered when the agent is ready, queued while it is
+busy, and a stopped agent is started first. --now interjects it into the turn
+that is running; --stop interrupts the turn (no text needed). Text "-" reads it
+from stdin. Delivery is typed into the agent's composer (docs/steering.md).
+
+From inside an agent session the same scope applies as for amux do steer: a
+member may message only itself, a coordinator also its members.
+
+flags:
+  --now   interject into the running turn instead of queueing a new prompt
+  --stop  interrupt the running turn
+
+examples:
+  amux send 3f7a "rebase on master"
+  amux send 9c1b "status report, please"
+  amux send 3f7a --now "use the v2 endpoint"
+  amux send 3f7a --stop

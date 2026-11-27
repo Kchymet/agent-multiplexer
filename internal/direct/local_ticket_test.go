@@ -12,7 +12,7 @@ import (
 
 // Local device tickets (NewLocalTicket, OpEnrollTicket): minted by the host
 // operator with no cloud policy, then claimed and redeemed exactly like a cloud
-// device ticket. These are the QR form of `amux direct enroll`.
+// device ticket. These are the QR form of `amux device connect`.
 
 func plainAuthority(t *testing.T, c *clock) (*Authority, string) {
 	t.Helper()

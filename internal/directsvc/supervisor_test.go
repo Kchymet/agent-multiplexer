@@ -199,7 +199,7 @@ func TestSupervisorRestartsCrashedChildWithBackoff(t *testing.T) {
 	h := newHarness(t, enabledCfg)
 	h.run()
 	p1 := h.nextStart()
-	p1.exit(errors.New("exit status 1: another `amux direct serve` already owns the direct store"))
+	p1.exit(errors.New("exit status 1: another `amux device serve` already owns the direct store"))
 	st := h.waitStatus(func(s Status) bool { return s.Restarts == 1 })
 	if !strings.Contains(st.LastError, "already owns the direct store") {
 		t.Fatalf("last error = %q, want the child's reason", st.LastError)

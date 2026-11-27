@@ -217,7 +217,7 @@ Goal completion alone never authorizes archive.
   for authorization, launch and runtime cleanup, preserving their own flags and
   timestamps. Runtimes stop and credentials are revoked, including after a
   daemon restart. Worktrees, branches and conversations remain. Restoration is
-  host-only: `amux workgroup unarchive <id>` regrants previously active members
+  host-only: `amux unarchive <id>` regrants previously active members
   before restoring the root. Independently completed members remain archived.
 - **Identity:** unlike the activity verbs, `done` acts on the authenticated
   principal's *store* subject (the id archive/rename actions take). It accepts no
@@ -232,7 +232,7 @@ Goal completion alone never authorizes archive.
   has no general control access. Post-commit delivery failures still clean up;
   the caller must not claim success without confirmation from the daemon.
 
-The member `archived` field in `amux workgroup ls --json` (`QuerySessions`) is
+The member `archived` field in `amux ls --json` (`QuerySessions`) is
 its independent completion flag. The rail and archive search also reflect parent
 archival; authorization and launch checks use that effective state. Restore the
 workgroup first when a member is shown archived because of its parent.

@@ -20,9 +20,9 @@ import (
 	"amux/internal/providercfg"
 )
 
-// The daemon-managed direct listener: `amux direct enable` saves the
+// The daemon-managed direct listener: `amux device enable` saves the
 // configuration with enabled=true, and the daemon's supervisor
-// (internal/directsvc) runs `amux direct serve --managed` from it for as long
+// (internal/directsvc) runs `amux device serve --managed` from it for as long
 // as the daemon runs. See docs/direct-access.md.
 
 // directWaitBudget bounds how long enable/disable wait for the supervisor to
@@ -157,19 +157,19 @@ func validateDirectSettings(s directsvc.Settings) error {
 // may bring the listener up.
 func managedServeConfig(s directsvc.Settings, set bool) (direct.ServeConfig, error) {
 	if !set || !s.Enabled {
-		return direct.ServeConfig{}, errors.New("the managed direct listener is not enabled (amux direct enable)")
+		return direct.ServeConfig{}, errors.New("the managed direct listener is not enabled (amux device enable)")
 	}
 	return settingsServeConfig(s)
 }
 
 func cmdDirectEnable(args []string) error {
-	fs := newCmdFlagSet("direct enable")
+	fs := newCmdFlagSet("device enable")
 	var f directSettingsFlags
 	f.register(fs)
 	var tf tailnetFlags
 	tf.register(fs)
 	noWait := fs.Bool("no-wait", false, "")
-	if err := parseCmdFlags(fs, "direct enable", args); err != nil {
+	if err := parseCmdFlags(fs, "device enable", args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -217,10 +217,10 @@ func cmdDirectEnable(args []string) error {
 	// The daemon owns the listener, so a stopped daemon is started the same way
 	// any amux command starts it. --no-wait skips only the readiness wait.
 	if err := directEnsureDaemon(); err != nil {
-		return fmt.Errorf("the setting is saved, but the daemon could not be started: %w\nstart it with amux daemon start; the listener starts with it (amux direct status shows progress)", err)
+		return fmt.Errorf("the setting is saved, but the daemon could not be started: %w\nstart it with amux daemon start; the listener starts with it (amux device status shows progress)", err)
 	}
 	if *noWait {
-		fmt.Println("the daemon applies it within a few seconds; check with amux direct status")
+		fmt.Println("the daemon applies it within a few seconds; check with amux device status")
 		return nil
 	}
 	return waitManaged(directsvc.Fingerprint(s), true, since)
@@ -239,9 +239,9 @@ var directEnsureDaemon = func() error {
 }
 
 func cmdDirectDisable(args []string) error {
-	fs := newCmdFlagSet("direct disable")
+	fs := newCmdFlagSet("device disable")
 	noWait := fs.Bool("no-wait", false, "")
-	if err := parseCmdFlags(fs, "direct disable", args); err != nil {
+	if err := parseCmdFlags(fs, "device disable", args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -289,12 +289,12 @@ func waitManaged(fp string, running bool, since time.Time) error {
 				// server answers the admin socket, which a manual serve can do
 				// while the new child is still about to fail on the store lock.
 				if r := readManagedReady(); st.Serving(r) {
-					fmt.Printf("listener running (pid %d, server_id %s on %s) — amux direct status for details\n", st.PID, r.ServerID, r.Addr)
-					fmt.Println("enroll a phone by scanning a QR code: amux direct enroll --qr")
+					fmt.Printf("listener running (pid %d, server_id %s on %s) — amux device status for details\n", st.PID, r.ServerID, r.Addr)
+					fmt.Println("enroll a phone by scanning a QR code: amux device connect --qr")
 					return nil
 				}
 			case running && st.Fingerprint == fp && st.State == directsvc.StateBackoff && st.LastError != "":
-				return fmt.Errorf("the daemon could not start the listener: %s (it retries with backoff; see amux direct logs)", st.LastError)
+				return fmt.Errorf("the daemon could not start the listener: %s (it retries with backoff; see amux device logs)", st.LastError)
 			case running && st.State == directsvc.StateInvalid:
 				return fmt.Errorf("the daemon cannot read the setting: %s", st.LastError)
 			case !running && st.State == directsvc.StateDisabled:
@@ -307,7 +307,7 @@ func waitManaged(fp string, running bool, since time.Time) error {
 	if last.State == "" {
 		return fmt.Errorf("the running daemon has not picked up the setting within %s; it may predate managed direct support — run amux daemon restart to load the current binary", directWaitBudget)
 	}
-	return fmt.Errorf("the listener is not ready after %s (supervisor: %s; see amux direct status and amux direct logs)", directWaitBudget, last)
+	return fmt.Errorf("the listener is not ready after %s (supervisor: %s; see amux device status and amux device logs)", directWaitBudget, last)
 }
 
 // directProbeServer is probeDirectServer, replaceable in tests.
@@ -322,7 +322,7 @@ func readManagedReady() *directsvc.Ready {
 	return &r
 }
 
-// Phases `amux direct status` reports for the managed listener.
+// Phases `amux device status` reports for the managed listener.
 const (
 	directPhaseOff        = "off"
 	directPhaseConfigured = "configured"
@@ -354,7 +354,7 @@ func directPhase(s directsvc.Settings, set bool, m *directsvc.Status, ready *dir
 		case m.Serving(ready):
 			return directPhaseStarting, "the managed server reported ready but is not answering its admin socket"
 		case srv != nil:
-			return directPhaseStarting, "another direct server (a manual amux direct serve?) answers for the store; the managed child cannot own it"
+			return directPhaseStarting, "another direct server (a manual amux device serve?) answers for the store; the managed child cannot own it"
 		}
 		return directPhaseStarting, "the listener process is up but its server is not ready yet"
 	case directsvc.StateBackoff:
@@ -365,7 +365,7 @@ func directPhase(s directsvc.Settings, set bool, m *directsvc.Status, ready *dir
 	return directPhaseStarting, "supervisor state " + m.State
 }
 
-// directStatusReport is `amux direct status --json`.
+// directStatusReport is `amux device status --json`.
 type directStatusReport struct {
 	Phase    string              `json:"phase"` // off | configured | starting | running | failed
 	Reason   string              `json:"reason,omitempty"`
@@ -411,7 +411,7 @@ type directProviderView struct {
 func cmdDirectStatus(args []string) error {
 	asJSON := len(args) == 1 && args[0] == "--json"
 	if len(args) > 0 && !asJSON {
-		return errors.New("usage: amux direct status [--json]")
+		return errors.New("usage: amux device status [--json]")
 	}
 	r := directStatusReport{}
 	var err error
@@ -488,9 +488,9 @@ func directProviderCoherence(srv *directServerStatus, configured bool, st provid
 	case srv == nil:
 		v.Note = "not advertised: no direct server is answering"
 	case !cloud:
-		v.Note = "not advertised: cloud enrollment is off (amux direct cloud enable)"
+		v.Note = "not advertised: cloud enrollment is off (amux cloud enroll enable)"
 	case !configured:
-		v.Note = "not advertised: the provider is not configured to offer it (amux provide install --direct-enroll)"
+		v.Note = "not advertised: the provider is not configured to offer it (amux cloud connect --direct-enroll)"
 	default:
 		v.Stale = true
 		v.Note = "not advertised yet (inferred: it should be); the provider re-registers within about a minute"
@@ -507,7 +507,7 @@ func printDirectStatus(r directStatusReport) {
 	fmt.Println(line)
 	switch {
 	case !r.Set:
-		fmt.Println("setting   direct.enabled off (default) — amux direct enable --tailnet, or --listen … --endpoint … --tls-cert … --tls-key …")
+		fmt.Println("setting   direct.enabled off (default) — amux device enable --tailnet, or --listen … --endpoint … --tls-cert … --tls-key …")
 	default:
 		fmt.Printf("setting   direct.enabled %s · listen %s · endpoints %s\n", onOff(s.Enabled), s.Listen, strings.Join(s.Endpoints, ", "))
 		fmt.Printf("          tls %s · %s\n", s.TLSCert, s.TLSKey)
@@ -529,7 +529,7 @@ func printDirectStatus(r directStatusReport) {
 	} else {
 		fmt.Printf("server    server_id %s · endpoints %s\n", r.Server.ServerID, strings.Join(r.Server.Endpoints, ", "))
 		if r.Managed == nil || !r.Managed.Serving(r.Ready) || r.Ready.ServerID != r.Server.ServerID {
-			fmt.Println("          (not the daemon's child: a manually run amux direct serve owns the store)")
+			fmt.Println("          (not the daemon's child: a manually run amux device serve owns the store)")
 		}
 		if r.Clients != nil {
 			fmt.Printf("          enrolled clients %d\n", *r.Clients)
@@ -552,13 +552,13 @@ func printDirectStatus(r directStatusReport) {
 		fmt.Printf("          registered offer: server_id %s · %s\n", r.Provider.ObservedServerID, strings.Join(r.Provider.ObservedEndpoints, ", "))
 	}
 	printDirectEnroll(r.Enroll)
-	fmt.Printf("logs      %s (amux direct logs)\n", directsvc.LogPath())
+	fmt.Printf("logs      %s (amux device logs)\n", directsvc.LogPath())
 }
 
 func cmdDirectLogs(args []string) error {
-	fs := newCmdFlagSet("direct logs")
+	fs := newCmdFlagSet("device logs")
 	n := fs.Int("n", 50, "")
-	if err := parseCmdFlags(fs, "direct logs", args); err != nil {
+	if err := parseCmdFlags(fs, "device logs", args); err != nil {
 		return err
 	}
 	lines, err := tailLines(directsvc.LogPath(), *n)
@@ -607,7 +607,7 @@ func reportDirect() {
 		return
 	}
 	if !set || !s.Enabled {
-		fmt.Printf("  · listener  off — amux direct enable to have the daemon run it\n")
+		fmt.Printf("  · listener  off — amux device enable to have the daemon run it\n")
 		return
 	}
 	var m *directsvc.Status

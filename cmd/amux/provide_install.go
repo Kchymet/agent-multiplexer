@@ -14,27 +14,27 @@ import (
 )
 
 // cmdProvideInstall writes the provider config file and installs the user
-// service that runs `amux provide` from it. Registering a machine used to mean
+// service that runs `amux cloud run` from it. Registering a machine used to mean
 // running the provider by hand in a terminal that had to stay open — nothing
 // survived a reboot. This is the two-command version of that: install, then
 // doctor.
 //
 // It merges over any existing config, so re-running it to change one setting
-// (`amux provide install --name laptop`) keeps the rest, and re-running it after
+// (`amux cloud connect --name laptop`) keeps the rest, and re-running it after
 // a binary upgrade re-points and restarts the service.
 func cmdProvideInstall(args []string) error {
-	fset := newCmdFlagSet("provide install")
+	fset := newCmdFlagSet("cloud connect")
 	var f provideFlags
 	f.register(fset)
 	dryRun := fset.Bool("dry-run", false, "")
 	execFlag := fset.String("exec", "", "")
 	// Install takes the same address-plus-flags shape as running the provider, so
-	// it needs the same any-order parse. Without it, `amux provide install
+	// it needs the same any-order parse. Without it, `amux cloud connect
 	// orch:7443 --token-file tok` drops every flag after the address: unlike the
 	// run path — where a dropped --ca surfaced much later as a bad certificate —
 	// Validate catches the missing token and rejects a command line that is
 	// perfectly correct, which is a better failure but still the wrong one.
-	operands, err := parseCmdFlagsAnyOrder(fset, "provide install", args)
+	operands, err := parseCmdFlagsAnyOrder(fset, "cloud connect", args)
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func cmdProvideInstall(args []string) error {
 
 	svc, err := providercfg.Service()
 	if err != nil {
-		return fmt.Errorf("provide install: %w — run `amux provide <addr>` in the foreground instead", err)
+		return fmt.Errorf("provide install: %w — run `amux cloud run <addr>` in the foreground instead", err)
 	}
 
 	cfg, err := providercfg.Load()
@@ -133,7 +133,7 @@ func cmdProvideInstall(args []string) error {
 // credentials and settings needed to reinstall it.
 func cmdProvideUninstall(args []string) error {
 	if len(args) > 0 {
-		return fmt.Errorf("usage: amux provide uninstall  (takes no arguments)")
+		return fmt.Errorf("usage: amux cloud disconnect  (takes no arguments)")
 	}
 	svc, err := providercfg.Service()
 	if err != nil {

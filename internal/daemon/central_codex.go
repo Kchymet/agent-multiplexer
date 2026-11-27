@@ -23,7 +23,7 @@ import (
 // codexLoginTimeout bounds one interactive central Codex login.
 const codexLoginTimeout = 15 * time.Minute
 
-var errCentralCodexUnavailable = errors.New("central Codex auth is unavailable in this daemon; see amux auth status codex")
+var errCentralCodexUnavailable = errors.New("central Codex auth is unavailable in this daemon; see amux harness auth status codex")
 
 // centralCodex is the daemon's single owner of the central Codex home. Only
 // the daemon (or, with no daemon running, the host CLI) may own it; the

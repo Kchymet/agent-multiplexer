@@ -239,14 +239,20 @@ func selfRole(argv []string) string {
 		if next == "" {
 			return RoleDaemon
 		}
-	case "provide":
-		if next != "install" && next != "uninstall" {
+	case "provide": // the old spelling of amux cloud run, which services still use
+		if next != "install" && next != "uninstall" && next != "revoke" {
 			return RoleProvide
 		}
+	case "cloud":
+		if next == "run" {
+			return RoleProvide
+		}
+	case "open":
+		return RoleTUI
 	case "serve":
 		return RoleServe
 	case "workgroup", "wg", "session", "ses", "workspace", "ws":
-		if next == "open" {
+		if next == "open" || next == "switch" {
 			return RoleTUI
 		}
 	}

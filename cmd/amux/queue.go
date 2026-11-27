@@ -12,15 +12,16 @@ import (
 	"amux/internal/items"
 	"amux/internal/queue"
 	"amux/internal/sessionrpc"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// amux queue — the user question queue (internal/queue, docs/direct-console.md
+// amux inbox — the user question queue (internal/queue, docs/direct-console.md
 // §4): every pending question for the user, from any session, in one place,
 // with answers routed back to the asking session. Reading it works from a host
 // terminal and from the admin console and the overseer; answering, dismissing
 // and acknowledging are the user's alone (host terminal).
 
-// queueAnswerFields parses `amux queue answer` arguments after the entry id.
+// queueAnswerFields parses `amux inbox answer` arguments after the entry id.
 func queueAnswerFields(entry string, args []string) (map[string]string, error) {
 	fields := map[string]string{core.QueueEntryField: entry}
 	var text, choices []string
@@ -69,7 +70,7 @@ func queueAnswerFields(entry string, args []string) (map[string]string, error) {
 func cmdQueue(args []string) error {
 	sub := "list"
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
-		return showHelp("queue")
+		return showHelp("inbox")
 	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub, args = args[0], args[1:]
@@ -79,35 +80,46 @@ func cmdQueue(args []string) error {
 		return queueList(args, os.Stdout)
 	case "answer", "reply":
 		if len(args) < 1 {
-			return usageErr("queue answer")
+			return usageErr("inbox answer")
+		}
+		if isFormAnswer(args[1:]) {
+			return inboxFormAnswer(args[0], args[1:])
 		}
 		fields, err := queueAnswerFields(args[0], args[1:])
 		if err != nil {
 			return err
 		}
 		return queueHostAction(core.Action{Action: core.ActionQueueAnswer, Fields: fields}, "answered "+args[0])
+	case "questions":
+		return questionList(args, os.Stdout)
+	case "show":
+		return questionShow(args, os.Stdout)
+	case "cancel":
+		return inboxCancel(args)
+	case "release":
+		return inboxRelease(args)
 	case "dismiss":
 		if len(args) != 1 {
-			return usageErr("queue dismiss")
+			return usageErr("inbox dismiss")
 		}
 		return queueHostAction(core.Action{Action: core.ActionQueueDismiss, Fields: map[string]string{core.QueueEntryField: args[0]}}, "dismissed "+args[0])
 	case "ack", "acknowledge":
 		if len(args) != 1 {
-			return usageErr("queue ack")
+			return usageErr("inbox ack")
 		}
 		return queueHostAction(core.Action{Action: core.ActionItemState, ID: items.GlobalInbox(), Fields: map[string]string{
 			core.ItemIDField: args[0], core.ItemStateField: items.VerbAck,
 		}}, "acknowledged "+args[0])
 	case "help", "-h", "--help":
-		return showHelp("queue")
+		return showHelp("inbox")
 	}
-	return usagef("unknown queue subcommand %q", sub)
+	return usagef("unknown inbox subcommand %q", sub)
 }
 
 // queueHostAction runs a user-only queue action from a host terminal.
 func queueHostAction(a core.Action, done string) error {
 	if sessionContextRestricted() {
-		return errors.New("only the user answers the question queue: run `amux queue` in your own terminal (or press i in the TUI)")
+		return errors.New("only the user answers the question queue: run `amux inbox` in your own terminal (or press i in the TUI)")
 	}
 	if err := sendAction(a); err != nil {
 		return err
@@ -214,14 +226,18 @@ func renderQueue(w io.Writer, o queue.Overview) {
 					fmt.Fprintln(w)
 				}
 			}
-			fmt.Fprintf(w, "    answer: amux queue answer %s --choice <label>  (or free text)\n", e.ID)
+			if e.Form != nil && e.Form.Version == harnessproto.FormVersion {
+				fmt.Fprintf(w, "    answer: amux inbox answer %s --select <label|n> ...  (amux inbox show %s for the whole form)\n", e.ID, e.ID)
+			} else {
+				fmt.Fprintf(w, "    answer: amux inbox answer %s --choice <label>  (or free text)\n", e.ID)
+			}
 		case queue.KindPermission:
 			if e.Body != "" {
 				fmt.Fprintf(w, "    %s\n", oneLine(e.Body, 200))
 			}
-			fmt.Fprintf(w, "    answer: amux queue answer %s --allow | --deny\n", e.ID)
+			fmt.Fprintf(w, "    answer: amux inbox answer %s --allow | --deny\n", e.ID)
 		case queue.KindGoalInput:
-			fmt.Fprintf(w, "    answer: amux queue answer %s <text>\n", e.ID)
+			fmt.Fprintf(w, "    answer: amux inbox answer %s <text>\n", e.ID)
 		case queue.KindDecision:
 			if e.Suggest != "" {
 				fmt.Fprintf(w, "    suggested: %s\n", oneLine(e.Suggest, 160))
@@ -229,7 +245,7 @@ func renderQueue(w io.Writer, o queue.Overview) {
 			for _, pr := range e.PRs {
 				fmt.Fprintf(w, "    pr: %s\n", oneLine(pr, 80))
 			}
-			fmt.Fprintf(w, "    item %s · answer: amux queue answer %s <text> · amux queue ack %s\n", e.Item, e.ID, e.Item)
+			fmt.Fprintf(w, "    item %s · answer: amux inbox answer %s <text> · amux inbox ack %s\n", e.Item, e.ID, e.Item)
 		}
 	}
 	if len(s.Workgroups) > 0 {
