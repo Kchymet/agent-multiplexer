@@ -122,7 +122,14 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	go wake.Run(ctx)
 	adminErr := make(chan error, 1)
 	go func() { adminErr <- admin.Serve(ctx) }()
+	// drained closes once in-flight handlers have returned (or the grace ran
+	// out). hs.Serve returns as soon as Shutdown closes the listener, so
+	// Serve waits on this before closing the authority: otherwise a stream
+	// still ending runs against a closed store, and its outcome (the
+	// server_closed record) may land after Serve has returned.
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		select {
 		case <-shutdown:
 		case <-ctx.Done(): // Serve failed on its own
@@ -144,6 +151,7 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	}
 	err = hs.Serve(tlsLn)
 	cancel()
+	<-drained
 	if errors.Is(err, http.ErrServerClosed) {
 		err = nil
 	}
