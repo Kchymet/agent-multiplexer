@@ -494,6 +494,10 @@ type formState struct {
 	// extra are fixed fields sent with the form's own (e.g. the queue entry an
 	// answer is for).
 	extra map[string]string
+	// context is untrusted text shown wrapped under the title (the question
+	// a queue reply answers), up to maxContextRows and the rows the pane can
+	// spare; the full text stays in the queue panel behind the form.
+	context string
 }
 
 func (fs *formState) values() map[string]string {
@@ -906,7 +910,12 @@ func (m *model) renderForm() string {
 	if m.paneRows() < formChrome+len(footer)-1+len(fs.fields) {
 		chrome, pad = formChrome-4, 0
 	}
-	rows := m.paneRows() - chrome - (len(footer) - 1) - (len(fs.fields) - 1)
+	fixed := chrome + (len(footer) - 1) + (len(fs.fields) - 1)
+	ctx := m.formContext(inner, m.paneRows()-fixed-2) // keep a field row and a spacer
+	if len(ctx) > 0 {
+		fixed += len(ctx) + pad
+	}
+	rows := m.paneRows() - fixed
 	if rows > maxFieldRows {
 		rows = maxFieldRows
 	}
@@ -924,6 +933,12 @@ func (m *model) renderForm() string {
 	}
 	row(titleStyle.Render(fs.title))
 	spacer()
+	if len(ctx) > 0 {
+		for _, l := range ctx {
+			row(l)
+		}
+		spacer()
+	}
 	for i, f := range fs.fields {
 		active := i == fs.cursor
 		marker := "  "
@@ -971,6 +986,27 @@ func (m *model) renderForm() string {
 		MaxWidth(m.mainWidth()).MaxHeight(m.paneRows()).
 		Render(strings.TrimSuffix(b.String(), "\n"))
 	return lipgloss.Place(m.mainWidth(), m.paneRows(), lipgloss.Center, lipgloss.Center, box)
+}
+
+// maxContextRows caps a form's context block.
+const maxContextRows = 6
+
+// formContext wraps the form's context to width in at most budget rows (and
+// maxContextRows), ending in an ellipsis when cut.
+func (m *model) formContext(width, budget int) []string {
+	if strings.TrimSpace(m.form.context) == "" || budget < 1 {
+		return nil
+	}
+	all := wrapText(m.form.context, width)
+	n := min(len(all), budget, maxContextRows)
+	out := make([]string, n)
+	for i := range out {
+		out[i] = dimFn(all[i])
+	}
+	if n < len(all) {
+		out[n-1] = dimFn(truncate(all[n-1]+" …", width))
+	}
+	return out
 }
 
 // formHint is the footer line: the vim mode on a text field, else generic help.

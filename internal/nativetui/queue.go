@@ -38,6 +38,9 @@ type queuePanel struct {
 
 	open bool
 	sel  int
+	// scroll is the desired first body row; rendering clamps it so the
+	// selected entry stays in view at the current width.
+	scroll int
 }
 
 func (q *queuePanel) interval() time.Duration {
@@ -132,13 +135,17 @@ func (m *model) handleQueueKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "i", "esc", "q", "ctrl+c":
 		q.open = false
 	case "up", "k":
-		q.sel = max(0, q.sel-1)
+		m.queueSelect(max(0, q.sel-1))
 	case "down", "j":
-		q.sel = min(max(0, n-1), q.sel+1)
+		m.queueSelect(min(max(0, n-1), q.sel+1))
 	case "home", "g":
-		q.sel = 0
+		m.queueSelect(0)
 	case "end", "G":
-		q.sel = max(0, n-1)
+		m.queueSelect(max(0, n-1))
+	case "pgdown", "ctrl+f":
+		m.queuePage(1)
+	case "pgup", "ctrl+b":
+		m.queuePage(-1)
 	case "y":
 		if has && e.Kind == queue.KindPermission {
 			return m, m.queueAnswer(e, map[string]string{core.SteerDecision: core.SteerAllow})
@@ -184,6 +191,32 @@ func (m *model) openQueueReplyForm(e queue.Entry) {
 		extra:  map[string]string{core.QueueEntryField: e.ID},
 		fields: []*formField{{key: core.QueueTextField, label: "Answer"}},
 	}
+	m.form.context = queueReplyContext(e)
+}
+
+// queueReplyContext is the text a reply answers: each question (with its
+// header chip and numbered options), else the entry's body or title.
+func queueReplyContext(e queue.Entry) string {
+	if e.Kind != queue.KindQuestion || len(e.Questions) == 0 {
+		return firstNonEmptyText(e.Body, e.Title)
+	}
+	var b strings.Builder
+	for _, q := range e.Questions {
+		b.WriteString(headerChip(q.Header) + cleanText(q.Question) + "\n")
+		for i, o := range q.Options {
+			fmt.Fprintf(&b, "%d. %s\n", i+1, flat(o.Label))
+		}
+	}
+	return b.String()
+}
+
+func firstNonEmptyText(s ...string) string {
+	for _, v := range s {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // queueSummaryLine is the rail footer's queue line ("" when there is nothing
@@ -217,10 +250,36 @@ func (m *model) renderQueue() string {
 	return lipgloss.NewStyle().Width(w).Height(h).MaxHeight(h).Render(strings.Join(lines, "\n"))
 }
 
-func (m *model) queueLines(w, h int) []string {
+// queueLayout is the panel laid out at one width: the fixed header rows, the
+// scrolling body, each entry's [start, end) span in the body, and the body
+// rows available. It is rebuilt on every render and key, never cached, so a
+// resize re-wraps everything.
+type queueLayout struct {
+	head  []string
+	body  []string
+	spans [][2]int
+	avail int
+}
+
+// selSpan is the selected entry's body span ({0,0} when there is none).
+func (l queueLayout) selSpan(sel int) (int, int) {
+	if sel < 0 || sel >= len(l.spans) {
+		return 0, 0
+	}
+	return l.spans[sel][0], l.spans[sel][1]
+}
+
+// top is the first body row shown for the desired scroll offset: the
+// selected entry always stays in view (see scrollWindow).
+func (l queueLayout) top(scroll, sel int) int {
+	s, e := l.selSpan(sel)
+	return scrollWindow(scroll, len(l.body), l.avail, s, e)
+}
+
+func (m *model) queueLayout(w, h int) queueLayout {
 	q := &m.qp
-	title := titleStyle.Render(" Questions for you") + dimStyle.Render(" · ") + keyStyle.Render("i") + dimStyle.Render(" close")
-	lines := []string{cellPad(title, w)}
+	var l queueLayout
+	l.head = []string{titleStyle.Render(" Questions for you") + dimStyle.Render(" · ") + keyStyle.Render("i") + dimStyle.Render(" close")}
 	if q.ov == nil {
 		msg := "loading the question queue…"
 		if q.unavailable {
@@ -229,41 +288,111 @@ func (m *model) queueLines(w, h int) []string {
 				msg += ": " + q.reason
 			}
 		}
-		return append(lines, "", dimStyle.Render(" "+truncate(msg, w-1)))
+		l.head = append(l.head, "")
+		l.head = append(l.head, hang(" ", msg, w, dimFn, true)...)
+		return l
 	}
 	s := q.ov.Summary
-	lines = append(lines, dimStyle.Render(truncate(fmt.Sprintf(" workgroups: %d need you · %d running · %d review/merge · %d done   global inbox: %d open · %d acknowledged",
-		s.NeedsYou, s.Running, s.Review, s.Done, q.ov.Inbox.Open, q.ov.Inbox.Acknowledged), w)))
+	l.head = append(l.head, hang(" ", fmt.Sprintf("workgroups: %d need you · %d running · %d review/merge · %d done   global inbox: %d open · %d acknowledged",
+		s.NeedsYou, s.Running, s.Review, s.Done, q.ov.Inbox.Open, q.ov.Inbox.Acknowledged), w, dimFn, true)...)
 	if len(q.ov.Entries) == 0 {
-		return append(lines, "", dimStyle.Render(" nothing is waiting on you"))
+		l.head = append(l.head, "", dimStyle.Render(" nothing is waiting on you"))
+		return l
 	}
-	lines = append(lines, "")
-	var body []string
-	selStart, selEnd := 0, 0
+	l.head = append(l.head, "")
 	for i, e := range q.ov.Entries {
-		if i == q.sel {
-			selStart = len(body)
-		}
-		body = append(body, queueEntryLines(e, i == q.sel, w)...)
-		if i == q.sel {
-			selEnd = len(body)
-		}
+		start := len(l.body)
+		l.body = append(l.body, queueEntryLines(e, i == q.sel, w)...)
+		l.spans = append(l.spans, [2]int{start, len(l.body)})
 	}
-	avail := max(1, h-len(lines))
-	start := 0
-	if selEnd > avail {
-		start = min(selStart, selEnd-avail)
-	}
-	end := min(len(body), start+avail)
-	return append(lines, body[start:end]...)
+	l.avail = max(1, h-len(l.head))
+	return l
 }
 
-// queueEntryLines renders one entry; agent text is flattened to plain lines.
-func queueEntryLines(e queue.Entry, selected bool, w int) []string {
-	cursor := "  "
-	if selected {
-		cursor = keyStyle.Render("▸ ")
+func (m *model) queueLines(w, h int) []string {
+	l := m.queueLayout(w, h)
+	if len(l.body) == 0 {
+		return l.head
 	}
+	top := l.top(m.qp.scroll, m.qp.sel)
+	end := min(len(l.body), top+l.avail)
+	l.head[0] = cellPad(l.head[0]+scrollMark(top, end-top, len(l.body)), w)
+	return append(l.head, l.body[top:end]...)
+}
+
+// queueSelect moves the selection to entry i and scrolls so its first rows
+// (all of it, when it fits) are in view.
+func (m *model) queueSelect(i int) {
+	q := &m.qp
+	q.sel = i
+	l := m.queueLayout(m.mainWidth(), m.paneRows())
+	s, e := l.selSpan(q.sel)
+	q.scroll = scrollWindow(l.top(q.scroll, q.sel), len(l.body), l.avail, s, min(e, s+l.avail))
+}
+
+// queuePage scrolls a page down (dir 1) or up (-1). Paging first walks
+// through a selected entry taller than the panel; past its end the window
+// moves on and the selection follows it to an entry in view, so the selected
+// entry never leaves the screen.
+func (m *model) queuePage(dir int) {
+	q := &m.qp
+	l := m.queueLayout(m.mainWidth(), m.paneRows())
+	if len(l.body) == 0 {
+		return
+	}
+	page := max(1, l.avail-1)
+	top := l.top(q.scroll, q.sel)
+	s, e := l.selSpan(q.sel)
+	if e-s > l.avail { // a tall selection: page within it first
+		if dir > 0 && top < e-l.avail {
+			q.scroll = min(top+page, e-l.avail)
+			return
+		}
+		if dir < 0 && top > s {
+			q.scroll = max(top-page, s)
+			return
+		}
+	}
+	next := min(max(0, top+dir*page), max(0, len(l.body)-l.avail))
+	if next == top { // already at the edge: step the selection instead
+		m.queueSelect(min(max(0, q.sel+dir), len(l.spans)-1))
+		return
+	}
+	// Select an entry wholly in the new window (the first going down, the
+	// last going up), else the one at the window's leading edge.
+	pick := -1
+	for i, sp := range l.spans {
+		if sp[0] >= next && sp[1] <= next+l.avail {
+			pick = i
+			if dir > 0 {
+				break
+			}
+		}
+	}
+	if pick < 0 {
+		edge := next
+		if dir < 0 {
+			edge = next + l.avail - 1
+		}
+		for i, sp := range l.spans {
+			if sp[0] <= edge && edge < sp[1] {
+				pick = i
+				break
+			}
+		}
+	}
+	if pick >= 0 {
+		q.sel = pick
+	}
+	q.scroll = next
+}
+
+// queueEntryLines renders one entry. Agent text is untrusted and drawn as
+// plain text. An unselected entry is two lines, its title cut with an
+// ellipsis; the selected entry wraps everything (full question text, header
+// chips, options with descriptions) to the width, so the full text is always
+// one keypress away.
+func queueEntryLines(e queue.Entry, selected bool, w int) []string {
 	who := e.Session
 	if e.SessionTitle != "" && e.SessionTitle != e.Session {
 		who = e.SessionTitle
@@ -271,48 +400,47 @@ func queueEntryLines(e queue.Entry, selected bool, w int) []string {
 	if e.Workgroup != "" && e.Workgroup != e.Session {
 		who = e.Workgroup + "/" + who
 	}
-	head := cursor + attnTextStyle.Render(e.Kind) + dimStyle.Render(" · "+truncate(flat(who), 40)+" · "+e.ID)
-	out := []string{truncate(head, w), "    " + truncate(flat(e.Title), w-4)}
 	if !selected {
-		return out
+		head := "  " + attnTextStyle.Render(e.Kind) + dimStyle.Render(" · "+truncate(flat(who), 40)+" · "+e.ID)
+		return []string{truncate(head, w), "    " + truncate(flat(e.Title), w-4), ""}
 	}
+	dim := dimFn
+	out := hang(keyStyle.Render("▸ ")+attnTextStyle.Render(e.Kind)+dim(" · "), flat(who)+" · "+e.ID, w, dim, true)
+	if e.Kind != queue.KindQuestion || len(e.Questions) == 0 {
+		out = append(out, hang("    ", e.Title, w, nil, true)...)
+	}
+	keys := func(s string) []string { return []string{fitLine("    "+s, w)} }
 	switch e.Kind {
 	case queue.KindPermission:
 		if e.Body != "" {
-			out = append(out, dimStyle.Render("    "+truncate(flat(e.Body), w-4)))
+			out = append(out, hang("    ", e.Body, w, dim, false)...)
 		}
-		out = append(out, "    "+keyStyle.Render("y")+dimStyle.Render(" allow  ")+keyStyle.Render("n")+dimStyle.Render(" deny  ")+keyStyle.Render("d")+dimStyle.Render(" hide"))
+		out = append(out, keys(keyStyle.Render("y")+dim(" allow  ")+keyStyle.Render("n")+dim(" deny  ")+keyStyle.Render("d")+dim(" hide"))...)
 	case queue.KindQuestion:
-		for qi, qq := range e.Questions {
-			if qi > 0 || len(e.Questions) > 1 {
-				out = append(out, "    "+truncate(flat(qq.Question), w-4))
-			}
+		for _, qq := range e.Questions {
+			out = append(out, hang("    ", headerChip(qq.Header)+cleanText(qq.Question), w, nil, false)...)
 			for oi, o := range qq.Options {
-				label := fmt.Sprintf("      %d %s", oi+1, flat(o.Label))
-				if o.Description != "" {
-					label += dimStyle.Render("  " + flat(o.Description))
-				}
-				out = append(out, truncate(label, w))
+				out = append(out, optionLines(questionOption{Number: oi + 1, Label: o.Label, Description: o.Description}, 6, w, false)...)
 			}
 		}
-		keys := keyStyle.Render("r") + dimStyle.Render(" reply  ") + keyStyle.Render("d") + dimStyle.Render(" hide")
+		k := keyStyle.Render("r") + dim(" reply  ") + keyStyle.Render("d") + dim(" hide")
 		if len(e.Questions) == 1 && !e.Questions[0].MultiSelect && len(e.Questions[0].Options) > 0 {
-			keys = keyStyle.Render("1-9") + dimStyle.Render(" choose  ") + keys
+			k = keyStyle.Render("1-9") + dim(" choose  ") + k
 		}
-		out = append(out, "    "+keys)
+		out = append(out, keys(k)...)
 	case queue.KindGoalInput:
 		if e.Body != "" && e.Body != e.Title {
-			out = append(out, dimStyle.Render("    "+truncate(flat(e.Body), w-4)))
+			out = append(out, hang("    ", e.Body, w, dim, false)...)
 		}
-		out = append(out, "    "+keyStyle.Render("r")+dimStyle.Render(" reply  ")+keyStyle.Render("d")+dimStyle.Render(" hide"))
+		out = append(out, keys(keyStyle.Render("r")+dim(" reply  ")+keyStyle.Render("d")+dim(" hide"))...)
 	case queue.KindDecision:
 		if e.Body != "" {
-			out = append(out, dimStyle.Render("    "+truncate(flat(e.Body), w-4)))
+			out = append(out, hang("    ", e.Body, w, dim, false)...)
 		}
 		if e.Suggest != "" {
-			out = append(out, dimStyle.Render("    suggested: "+truncate(flat(e.Suggest), w-16)))
+			out = append(out, hang(dim("    suggested: "), e.Suggest, w, dim, true)...)
 		}
-		out = append(out, "    "+keyStyle.Render("r")+dimStyle.Render(" answer  ")+keyStyle.Render("a")+dimStyle.Render(" acknowledge  ")+keyStyle.Render("d")+dimStyle.Render(" dismiss"))
+		out = append(out, keys(keyStyle.Render("r")+dim(" answer  ")+keyStyle.Render("a")+dim(" acknowledge  ")+keyStyle.Render("d")+dim(" dismiss"))...)
 	}
 	return append(out, "")
 }

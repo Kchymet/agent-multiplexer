@@ -1,0 +1,12 @@
+  [ ] 1. Tabs, one per area of the
+         settings page (Recommended)
+         Each tab holds one area; deep
+         links open a tab directly.
+         │ ┌Tabs┐
+         │ │ General │ Account │
+         │ Notifications │ Billing │
+         │ Advanced │
+         │     see https://github.com/Kc
+         │ hymet/agent-multiplexer/blob/
+         │ master/internal/nativetui/que
+         │ ue.go#L280-L320?plain=1
