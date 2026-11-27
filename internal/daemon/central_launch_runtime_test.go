@@ -165,7 +165,7 @@ func testCentralClaudeTypedLaunch(t *testing.T, mode string) {
 		t.Fatal(err)
 	}
 	out, err := run(3 * time.Second)
-	if err == nil || strings.Contains(out, "amux auth login") || !strings.Contains(out, "access was denied") {
+	if err == nil || strings.Contains(out, "amux harness login") || !strings.Contains(out, "access was denied") {
 		t.Fatalf("revoked launch = %v: %s", err, out)
 	}
 	if _, err := os.Stat(observed); !os.IsNotExist(err) {

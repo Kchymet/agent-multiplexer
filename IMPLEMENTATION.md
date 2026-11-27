@@ -12,7 +12,7 @@ No production behavior changes.
 
 ## Worker and base evidence
 
-- Authenticated `amux status --json` identifies this task session as Codex model
+- Authenticated `amux ls --json` identifies this task session as Codex model
   `gpt-5.6-sol`, task mode, with structured control.
 - The private Codex configuration sets `model_reasoning_effort = "high"`. Its
   default model is `gpt-6-astra`; the authenticated session snapshot proves the
@@ -94,7 +94,7 @@ broad isolation-dependency work.
 
 ## Worker and base evidence
 
-- Authenticated `amux status --json` identified worker `2f26f5` as live model
+- Authenticated `amux ls --json` identified worker `2f26f5` as live model
   `gpt-5.6-sol`.
 - The worker's private Codex configuration set
   `model_reasoning_effort = "high"`; the supported normalized turn stream showed

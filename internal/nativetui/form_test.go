@@ -104,8 +104,7 @@ func TestModelSelectorDefaultsOpusAndCycles(t *testing.T) {
 	// Navigate from the prompt field down to the model selector with j, then
 	// cycle forward with l. opus -> sonnet.
 	m.handleForm(key("j")) // prompt -> repos
-	m.handleForm(key("j")) // repos -> mode
-	m.handleForm(key("j")) // mode -> agent (Harness)
+	m.handleForm(key("j")) // repos -> agent (Harness)
 	m.handleForm(key("j")) // agent -> model
 	if m.form.active() != modelField {
 		t.Fatal("j navigation did not land on the model field")
@@ -179,8 +178,7 @@ func TestHarnessCyclesModelOptions(t *testing.T) {
 	m := &model{}
 	m.openAddAgentForm("root", "Root")
 
-	// prompt -> repos -> mode -> agent (Harness), then cycle claude -> codex.
-	m.handleForm(key("j"))
+	// prompt -> repos -> agent (Harness), then cycle claude -> codex.
 	m.handleForm(key("j"))
 	m.handleForm(key("j"))
 	if m.form.active() != m.form.field("agent") {
@@ -254,6 +252,26 @@ func TestVimNormalModeNotTyped(t *testing.T) {
 	}
 	if m.form.insert {
 		t.Fatal("should be in normal mode after Esc")
+	}
+}
+
+// Task vs interactive is derived from the role (members are tasks), never a
+// form choice: no create form offers a Mode field or submits one.
+func TestCreateFormsHaveNoMode(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	m := &model{w: 120, h: 40}
+	for name, open := range map[string]func(){
+		"new workgroup":      m.openNewWorkgroupForm,
+		"new repo workgroup": func() { m.openNewRepoWorkgroupForm("api", "api") },
+		"add agent":          func() { m.openAddAgentForm("9c1b", "auth") },
+	} {
+		open()
+		if m.form.field("mode") != nil {
+			t.Errorf("%s form offers a Mode field", name)
+		}
+		if _, ok := formFieldsForSubmit(m.form)["mode"]; ok {
+			t.Errorf("%s form submits a mode", name)
+		}
 	}
 }
 

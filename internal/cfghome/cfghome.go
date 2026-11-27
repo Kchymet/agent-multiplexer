@@ -14,7 +14,7 @@
 // can later tell exactly what the agent changed, what the user changed in the
 // template since, and where the two disagree. Scan reports that; Promote and
 // Reset act on it (propagate an agent's edit into the template, or discard it).
-// The daemon surfaces pending edits on the rail, `amux sandbox drift` lists
+// The daemon surfaces pending edits on the rail, `amux harness sandbox drift` lists
 // them, so a change an agent made to its own config never propagates silently
 // and never gets lost silently either.
 package cfghome

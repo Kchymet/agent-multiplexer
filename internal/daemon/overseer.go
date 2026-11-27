@@ -155,7 +155,7 @@ func overseerWakeText(hookGoal bool, lines []string, hasItems bool) string {
 		b.WriteString("\n- ")
 		b.WriteString(l)
 	}
-	b.WriteString("\nCheck `amux queue list` (what the user must answer) and act on these as your guide says.")
+	b.WriteString("\nCheck `amux inbox ls` (what the user must answer) and act on these as your guide says.")
 	if hasItems {
 		b.WriteString(" " + itemsTriageHint)
 	}
@@ -172,7 +172,7 @@ func overseerGoalUpdate(prev, cur, note string) (string, bool) {
 	note = boundRunes(note, 160)
 	switch cur {
 	case claudegoal.StatusInput:
-		return "asked the user: " + firstNonEmpty(note, "(see `amux queue list`)"), true
+		return "asked the user: " + firstNonEmpty(note, "(see `amux inbox ls`)"), true
 	case claudegoal.StatusBlocked:
 		return "reported itself blocked: " + firstNonEmpty(note, "(no reason given)"), true
 	case claudegoal.StatusComplete:

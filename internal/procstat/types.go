@@ -5,7 +5,7 @@
 // The daemon runs one Sampler in the background on a fixed interval and serves
 // its cached Snapshot through the control API (core.QueryResources); nothing
 // here runs on an RPC path. `amux top` and the `resources` sections of
-// `amux status --json` render that snapshot, and the TUI resources panel reads
+// `amux ls --json` render that snapshot, and the TUI resources panel reads
 // the same types, so the JSON shape below is a stable, additive contract: add
 // fields, never rename or repurpose them.
 //
@@ -136,9 +136,9 @@ type SamplerCost struct {
 // Process roles (Process.Role) for Self.Procs.
 const (
 	RoleDaemon  = "daemon"  // amux daemon
-	RoleProvide = "provide" // amux provide (provider mode)
+	RoleProvide = "provide" // amux cloud (provider mode)
 	RoleServe   = "serve"   // amux serve (standalone mux server)
-	RoleTUI     = "tui"     // the dashboard: bare amux / amux workgroup open
+	RoleTUI     = "tui"     // the dashboard: bare amux / amux open
 	RoleCLI     = "cli"     // any other amux invocation
 	RoleChild   = "child"   // a non-amux descendant of an amux process
 )

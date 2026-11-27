@@ -74,7 +74,7 @@ type Renewer struct {
 	RenewBefore time.Duration // default RenewBefore
 	Logf        func(string, ...any)
 	// OnChange, when set, is called after every check with the state to
-	// publish (for amux direct status).
+	// publish (for amux device status).
 	OnChange func(CertState)
 
 	mu      sync.Mutex
@@ -84,7 +84,7 @@ type Renewer struct {
 	nextDue time.Time
 }
 
-// CertState is the renewal state amux direct status reports. No key material.
+// CertState is the renewal state amux device status reports. No key material.
 type CertState struct {
 	Source      string    `json:"source"`
 	NotAfter    time.Time `json:"not_after"`

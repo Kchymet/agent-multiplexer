@@ -756,7 +756,7 @@ func readBoundedLine(reader *bufio.Reader, limit int) ([]byte, error) {
 // issuer-signed challenge to prove, forwards the returned proof, and requires
 // the daemon's welcome. The host listener admits only SubjectHost keys, so a
 // session or provider credential fails here. The authenticated connection is
-// closed without sending any request. `amux direct` uses it to gate its local
+// closed without sending any request. `amux device` uses it to gate its local
 // administration channel.
 func RelayHostProof(ctx context.Context, prove func(access.SocketChallenge) (access.SocketProof, error)) error {
 	pin, err := access.LoadCredential(access.DefaultCredentialDir(access.SubjectHost, access.LocalHostSubject))

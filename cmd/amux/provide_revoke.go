@@ -17,7 +17,7 @@ import (
 
 func cmdProvideRevoke(args []string) error {
 	if sessionContextRestricted() {
-		return errors.New("amux provide revoke is host-only and is not available inside an agent session")
+		return errors.New("amux cloud revoke is host-only and is not available inside an agent session")
 	}
 	cfg, err := parseProvideRevoke(args, providercfg.Load)
 	if errors.Is(err, flag.ErrHelp) {
@@ -32,7 +32,7 @@ func cmdProvideRevoke(args []string) error {
 		return err
 	}
 	fmt.Println("Provider registration and relay access revoked. Other broker replicas close connections on their revocation sweep.")
-	fmt.Println("Existing direct-client grants remain valid. Local config, token file and service are retained; use `amux provide uninstall` to remove the service.")
+	fmt.Println("Existing direct-client grants remain valid. Local config, token file and service are retained; use `amux cloud disconnect` to remove the service.")
 	return nil
 }
 
@@ -40,7 +40,7 @@ func cmdProvideRevoke(args []string) error {
 // Only transport settings are accepted: revocation never advertises capabilities
 // or opens a normal provider registration.
 func parseProvideRevoke(args []string, load func() (providercfg.Config, error)) (provider.Config, error) {
-	fs := newCmdFlagSet("provide revoke")
+	fs := newCmdFlagSet("cloud revoke")
 	var yes bool
 	var f provideFlags
 	fs.BoolVar(&yes, "yes", false, "")
@@ -48,7 +48,7 @@ func parseProvideRevoke(args []string, load func() (providercfg.Config, error)) 
 	fs.StringVar(&f.tokenFile, "token-file", "", "")
 	fs.StringVar(&f.caFile, "ca", "", "")
 	fs.StringVar(&f.serverName, "server-name", "", "")
-	operands, err := parseCmdFlagsAnyOrder(fs, "provide revoke", args)
+	operands, err := parseCmdFlagsAnyOrder(fs, "cloud revoke", args)
 	if err != nil {
 		return provider.Config{}, err
 	}

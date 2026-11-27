@@ -116,7 +116,7 @@ func (d *Daemon) setUpdatePending(version, reason string) {
 // (new CLI invocations use it; this daemon keeps its code), an incompatible one
 // is staged, and the daemon restarts itself into the new binary only once every
 // hosted agent has been idle between turns for consecutive polls. Until then the pending update is
-// reported by `amux version`, `amux doctor` and `amux status`.
+// reported by `amux version`, `amux doctor` and `amux ls`.
 func (d *Daemon) selfUpdateLoop(ctx context.Context) {
 	t := time.NewTimer(3 * time.Minute) // let startup and agent restore settle
 	defer t.Stop()

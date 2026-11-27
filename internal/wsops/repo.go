@@ -89,7 +89,7 @@ func RemoveRepo(name string) error {
 	if users, err := repoUsers(db, name); err != nil {
 		return err
 	} else if len(users) > 0 {
-		return fmt.Errorf("repo %q is in use by: %s\n  delete those first (amux workgroup rm <id>)",
+		return fmt.Errorf("repo %q is in use by: %s\n  delete those first (amux rm <id>)",
 			name, strings.Join(users, ", "))
 	}
 	removeRepoHome(db, name)

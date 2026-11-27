@@ -54,12 +54,12 @@ func testConsoleAccountCommandSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := `set -eu
-amux auth accounts --json > account-before.json
-printf '%s\n' SYNTHETIC-CONSOLE-CLI-TOKEN | amux auth login claude --token-stdin
-amux auth status claude > account-after.txt
-amux auth default claude
-amux auth logout claude
-amux auth accounts --json > account-logged-out.json
+amux harness auth accounts --json > account-before.json
+printf '%s\n' SYNTHETIC-CONSOLE-CLI-TOKEN | amux harness login claude --token-stdin
+amux harness auth status claude > account-after.txt
+amux harness auth default claude
+amux harness logout claude
+amux harness auth accounts --json > account-logged-out.json
 `
 	scriptPath := filepath.Join(console.Dir(), "account-test.sh")
 	if err = os.WriteFile(scriptPath, []byte(script), 0600); err != nil {

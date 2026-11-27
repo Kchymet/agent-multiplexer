@@ -13,7 +13,7 @@ import (
 
 // Tailnet cloud approvals (docs/direct-tailnet-enroll.md, direct-approval-v1).
 // A client posts a Harness approval to POST /direct/v1/enroll/cloud; the host
-// must have Harness verify and consume it. Only the provider (`amux provide`)
+// must have Harness verify and consume it. Only the provider (`amux cloud`)
 // holds the Harness connection, and it runs in another process, so the direct
 // server parks each verify here and the provider long-polls for them over the
 // host-only admin socket (OpApprovalLease), sends direct-approval-verify on its

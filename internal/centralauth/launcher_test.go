@@ -89,7 +89,7 @@ func TestLaunchDeliversTokenOnlyThroughClaudeEnvironment(t *testing.T) {
 	}
 	// Two unavailable answers produce one explanation, never the value.
 	msg := stderr.String()
-	if strings.Count(msg, "amux auth login") != 1 || strings.Contains(msg, mockToken) {
+	if strings.Count(msg, "amux harness login") != 1 || strings.Contains(msg, mockToken) {
 		t.Fatalf("launcher stderr = %q", msg)
 	}
 }
@@ -209,7 +209,7 @@ func TestLaunchClassifiesFailuresAndRecovers(t *testing.T) {
 				t.Fatalf("retry failed: %v: %s", err, out)
 			}
 			msg := string(out)
-			if !strings.Contains(msg, tc.want) || strings.Contains(msg, "amux auth login") != tc.login {
+			if !strings.Contains(msg, tc.want) || strings.Contains(msg, "amux harness login") != tc.login {
 				t.Fatalf("guidance: %s", msg)
 			}
 			if strings.Contains(msg, "secret-token") || strings.Contains(msg, "https://") || strings.Contains(msg, mockToken) {

@@ -25,7 +25,7 @@ mount, and how an agent's edits to its configuration come back to amux.
   promote back. Hooks, plugins and shell/editor configuration are executable
   inputs, not just preferences. See [Security](../SECURITY.md).
 - **Central authentication by default.** Log in once on the host with
-  `amux auth login` (Claude) and `amux auth login codex`. The daemon keeps each
+  `amux harness login` (Claude) and `amux harness login codex`. The daemon keeps each
   central credential outside every sandbox and delivers only a session
   credential to authorized sessions. No session receives a refresh token, the
   host harness login, or another session's credential. See
@@ -33,7 +33,7 @@ mount, and how an agent's edits to its configuration come back to amux.
 - **Every workload follows central auth.** The older `claude.auth` /
   `codex.auth` methods (`host`, `shared`, `environment`) are retired and were
   migrated once to central (see [Retired legacy modes](#retired-legacy-modes)).
-  An API key is a central login too (`amux auth login <claude|codex> --api-key`).
+  An API key is a central login too (`amux harness login <claude|codex> --api-key`).
   Codex MCP OAuth credentials keep their existing sharing: a hard link, because
   Codex requires a regular file when writing refreshed tokens.
 
@@ -47,13 +47,13 @@ for persisted workload bindings, replacement behavior and the remote grant setup
 #### Claude: one `setup-token` for every session
 
 ```sh
-amux auth login            # runs `claude setup-token`, then asks for the token
-amux auth login --token-stdin < token.txt
-amux auth status           # selected profile, safe identity and limits
-amux auth restart [--force]
+amux harness login            # runs `claude setup-token`, then asks for the token
+amux harness login --token-stdin < token.txt
+amux harness auth status           # selected profile, safe identity and limits
+amux harness auth restart [--force]
 ```
 
-`amux auth login` runs Claude Code's documented
+`amux harness login` runs Claude Code's documented
 [`claude setup-token`](https://code.claude.com/docs/en/authentication.md#generate-a-long-lived-token)
 browser flow. Claude prints the token to the terminal and does not save it, so
 amux asks you to paste it with terminal echo disabled (`--token-stdin` reads it
@@ -101,12 +101,12 @@ editor tab gets no amux credential and no host credential store; `/login`
 there creates a login private to that session's config copy.
 
 **Renewal is not automatic refresh.** A setup-token has no refresh token. Run
-`amux auth login` again before it expires to reissue it. The new token gets the
+`amux harness login` again before it expires to reissue it. The new token gets the
 next generation, which every workload receives at its next process launch
 without any rebind (see
 [next process launch](machine-accounts.md#defaults-and-existing-workloads)).
 Claude reads `CLAUDE_CODE_OAUTH_TOKEN` once per process, so a running agent keeps
-its old token until it restarts (`amux auth restart` restarts idle Claude agents). amux records when it
+its old token until it restarts (`amux harness auth restart` restarts idle Claude agents). amux records when it
 stored the token, not an expiry: it cannot read one from the opaque token.
 Reissuing does not revoke the previous token. It stays valid until it expires
 or is revoked through your Claude account.
@@ -126,13 +126,13 @@ of these is set:
   the session root, or the managed settings.
 
 The error names the setting, never its value. Remove the setting; for an API
-key use `amux auth login claude --api-key`. Cloud providers, `apiKeyHelper` and
+key use `amux harness login claude --api-key`. Cloud providers, `apiKeyHelper` and
 gateways are not supported for sessions.
 
 **Migration.** Workloads that used an older method were migrated to central
 automatically (see [Retired legacy modes](#retired-legacy-modes)). Until the
 first central login, a Claude agent pane refuses to start with
-`run amux auth login claude`. A credential symlink left from the retired host
+`run amux harness login claude`. A credential symlink left from the retired host
 mode in an agent's private config copy is unlinked without being followed, so
 nothing is written through to the host file. A private credential that is a
 regular file, the retired shared store and the host login are never deleted.
@@ -143,8 +143,8 @@ authenticated inside the session.
 #### Codex: a daemon-owned ChatGPT login
 
 ```sh
-amux auth login codex   # prints a browser URL; Ctrl-C cancels
-amux auth status codex  # mode, account email/plan, login state
+amux harness login codex   # prints a browser URL; Ctrl-C cancels
+amux harness auth status codex  # mode, account email/plan, login state
 ```
 
 The daemon owns the one central Codex home, `<amux data>/auth/codex` (mode 0700,
@@ -204,7 +204,7 @@ The account store's one-time version 2 migration moved every existing default
 and binding (including dormant, archived and console sessions) to central. It
 copies no credential: the host and shared logins hold rotating refresh tokens,
 and copying one would fork its refresh chain. Until a harness's first central
-login, Accounts and `amux auth status` report the migration as pending, and the
+login, Accounts and `amux harness auth status` report the migration as pending, and the
 next launch of a migrated workload uses the normal central login flow. Running
 processes are never stopped by the migration or by login. Old private credential
 files, the shared store and the host login are left on disk and no longer used.
@@ -379,7 +379,7 @@ starts with an empty transcript tree, history, and caches:
 
 | harness | copied (config) | not copied (state) | shared (auth) |
 |---------|-----------------|--------------------|---------------|
-| claude  | `settings.json`, `settings.local.json`, `CLAUDE.md`, `keybindings.json`, `statusline-command.sh`, `commands/`, `skills/`, `agents/`, `hooks/`, `output-styles/`, `plugins/`, `.claude.json` (minus its per-project trust table) | `projects/`, `history.jsonl`, `sessions/`, `session-env/`, `shell-snapshots/`, `file-history/`, caches, `statsig/`, `todos/` | host Keychain through the scoped daemon broker on macOS; host `.credentials.json` on Linux/WSL2; optional separate account after `amux auth login` |
+| claude  | `settings.json`, `settings.local.json`, `CLAUDE.md`, `keybindings.json`, `statusline-command.sh`, `commands/`, `skills/`, `agents/`, `hooks/`, `output-styles/`, `plugins/`, `.claude.json` (minus its per-project trust table) | `projects/`, `history.jsonl`, `sessions/`, `session-env/`, `shell-snapshots/`, `file-history/`, caches, `statsig/`, `todos/` | host Keychain through the scoped daemon broker on macOS; host `.credentials.json` on Linux/WSL2; optional separate account after `amux harness login` |
 | codex   | `config.toml`, `AGENTS.md`, `prompts/`, `skills/`, `rules/` | `sessions/`, `history.jsonl`, `log/`, `memories/` | `auth.json`, `.credentials.json` (MCP OAuth), `mcp-oauth-locks/` |
 
 ### MCP inheritance
@@ -401,9 +401,9 @@ inside the sandbox; amux does not export keyring secrets into files.
 For Codex and legacy Claude auth, missing shared credential links are added at the next launch, including for
 existing agents and logins completed after an agent was created. Existing config
 edits and private credential files are preserved. To update an existing agent's
-MCP definitions, use `amux sandbox reset <id> config.toml` (this resets the whole
+MCP definitions, use `amux harness sandbox reset <id> config.toml` (this resets the whole
 config file). For a detached MCP credential, use
-`amux sandbox reset <id> .credentials.json`. Relaunch the agent after either reset.
+`amux harness sandbox reset <id> .credentials.json`. Relaunch the agent after either reset.
 Existing private lock directories are overlaid with the shared directory inside
 the sandbox. When running with the amux sandbox disabled, an existing private
 lock directory must be reconciled before concurrent OAuth refreshes can share
@@ -418,14 +418,14 @@ in the copy at launch.
 
 Your Claude `settings.json` also flows down to **existing** agents, at each
 launch or resume. An agent that never edited its copy gets the template's current
-file (as `amux sandbox reset <id> settings.json` would). An agent that edited its
+file (as `amux harness sandbox reset <id> settings.json` would). An agent that edited its
 copy keeps those edits and gains only the `permissions.allow` rules it is
 missing. Its drift entry stays, because the edit is still the agent's to promote
 or reset. This is how a rule such as `Bash(amux agent done)` reaches every
 coordinator: agents cannot add allow rules for themselves, so add it to
 `~/.claude/settings.json` and relaunch (or wait for the next restart). Other
-template changes still need `amux sandbox reset` or a decision in
-`amux sandbox drift`.
+template changes still need `amux harness sandbox reset` or a decision in
+`amux harness sandbox drift`.
 
 Transcripts therefore live in the agent's private home. Host-side resume and
 runtime readers operate on that explicitly selected home; restricted sessions
@@ -477,7 +477,7 @@ Protected sessions do not receive `/usr/bin/open`, LaunchServices IPC or
 `lsopen` authority. Seatbelt cannot restrict `lsopen` to HTTP(S) or to a browser,
 so admitting it would permit arbitrary host-application launch outside the
 session profile. Authentication is therefore attended from a host terminal:
-run `amux auth login` for Claude or `amux auth login codex` for Codex, then copy
+run `amux harness login` for Claude or `amux harness login codex` for Codex, then copy
 any printed authorization URL into the host browser. This keeps the existing
 central credential/account broker and already enrolled model identity; it does
 not add a browser broker or another in-session opener.
@@ -528,7 +528,7 @@ and manifest attributes every difference:
 | `agent-changed` / `agent-added` / `agent-removed` | the agent edited its copy; the template still has what was seeded | `promote` (propagate) or `reset` (discard) |
 | `template-changed` | you changed the template since the seed; the copy is stale | `reset` pulls the new version into the copy |
 | `conflict` | both sides changed the same path differently | pick one with `promote` / `reset` |
-| `shared-detached` | a legacy linked auth file was replaced with a private file | `reset` re-links it to yours; use `amux auth login` for durable Claude sharing |
+| `shared-detached` | a legacy linked auth file was replaced with a private file | `reset` re-links it to yours; use `amux harness login` for durable Claude sharing |
 
 Files the harness churns on its own are compared on their configuration only:
 `.claude.json` on its config keys (`mcpServers`, `model`), `config.toml` without
@@ -544,16 +544,16 @@ Where you see it:
   every 10s) and appends `⚙ N config edits` to the agent's status line while any
   edit awaits a decision. The daemon log records the moment an agent's pending
   edits first appear or change.
-- **`amux sandbox drift [<id>] [--json]`** lists the diverged paths per agent with
+- **`amux harness sandbox drift [<id>] [--json]`** lists the diverged paths per agent with
   the paths of both versions, so you can diff them.
-- **`amux sandbox promote <id> <path>`** copies the agent's version into the
+- **`amux harness sandbox promote <id> <path>`** copies the agent's version into the
   template — into your config, and so into every agent seeded from now on.
   `.claude.json` is merged on its config keys, never overwritten, so your own
   state in it survives.
-- **`amux sandbox reset <id> <path>`** re-copies the template's version into the
+- **`amux harness sandbox reset <id> <path>`** re-copies the template's version into the
   agent (or removes a file the template lacks; or re-links a detached credential).
 - **`amux doctor`** summarizes how many agents have edits awaiting a decision.
-- **`amux sandbox path <id>`** prints an agent's private config dir(s) and the env
+- **`amux harness sandbox path <id>`** prints an agent's private config dir(s) and the env
   that points the harness at them.
 
 Nothing propagates in either direction on its own. Where both sides end up
@@ -633,7 +633,7 @@ credential links are filled in at launch. The agent guide
 | `wsops.ensureConfigHome` | seeds at creation and at every launch; `AgentEnv` exports the config env |
 | `panespec.configBinds` | binds shared auth and OAuth locks for the agent pane |
 | `source.configSuffix` | the rail's `⚙ N config edits` |
-| `cmd/amux/sandbox.go` | `amux sandbox drift / promote / reset / path` |
+| `cmd/amux/sandbox.go` | `amux harness sandbox drift / promote / reset / path` |
 
 ### Agent CLI mailbox access
 

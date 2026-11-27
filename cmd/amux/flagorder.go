@@ -7,7 +7,7 @@ import "flag"
 //
 // Go's flag package stops at the first non-flag argument: everything after it is
 // left in fs.Args() unparsed. For a command whose operand comes first in the
-// obvious phrasing — `amux provide host:7443 --ca ca.pem` — that means the flags
+// obvious phrasing — `amux cloud run host:7443 --ca ca.pem` — that means the flags
 // after it are silently dropped, which surfaces later as an unrelated failure:
 // a --ca that was never read looks exactly like a bad certificate.
 // So parse in rounds: hand the flag package what it will take, set the operand it

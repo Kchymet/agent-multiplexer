@@ -10,11 +10,11 @@ import (
 	"amux/internal/provider"
 )
 
-// cloudPins is the owner/provider pair `amux direct cloud enable` pins, and
+// cloudPins is the owner/provider pair `amux cloud enroll enable` pins, and
 // where it came from.
 //
 // Resolution source and trust boundary: an omitted pin is taken from this
-// host's own provider status file, which `amux provide` writes from the
+// host's own provider status file, which `amux cloud run` writes from the
 // orchestrator's `registered` frame — the reply to a registration
 // authenticated with this host's provider token over TLS to the orchestrator
 // the operator configured. The orchestrator fills the owner from its live
@@ -46,7 +46,7 @@ const cloudPinsOverride = "pass both --owner <harness-user-id> and --provider <p
 // "registered" and its recorded process still alive (the liveness amux doctor
 // uses). A disconnected, reconnecting, stopped or dead provider's last
 // registration may no longer be what Harness holds, so it is refused rather
-// than aged out by some TTL. `amux provide` holds a lock on the status file
+// than aged out by some TTL. `amux cloud run` holds a lock on the status file
 // (provider.LockStatus), so the one live writer is unambiguous.
 func resolveCloudPins(owner, prov string, st provider.Status, stErr error, alive func(int) bool) (cloudPins, error) {
 	if owner != "" && prov != "" {
@@ -59,17 +59,17 @@ func resolveCloudPins(owner, prov string, st provider.Status, stErr error, alive
 	}
 	switch {
 	case errors.Is(stErr, fs.ErrNotExist):
-		return cloudPins{}, fmt.Errorf("no Harness provider registration on this host (%s does not exist): run `amux provide` against Harness until `amux doctor` shows it registered, or %s", provider.StatusPath(), cloudPinsOverride)
+		return cloudPins{}, fmt.Errorf("no Harness provider registration on this host (%s does not exist): run `amux cloud run` against Harness until `amux doctor` shows it registered, or %s", provider.StatusPath(), cloudPinsOverride)
 	case stErr != nil:
 		return cloudPins{}, fmt.Errorf("read the provider registration %s: %w; or %s", provider.StatusPath(), stErr, cloudPinsOverride)
 	case st.State == provider.StateRejected:
 		return cloudPins{}, fmt.Errorf("the provider's last registration with %s was rejected (%s): fix the provider registration first, or %s", orNone(st.Orchestrator), orNone(st.LastError), cloudPinsOverride)
 	case st.State != provider.StateRegistered || st.ProviderID == "":
-		return cloudPins{}, fmt.Errorf("the provider is not registered with Harness right now (state %s): start `amux provide` and wait until `amux doctor` shows it registered, or %s", orNone(st.State), cloudPinsOverride)
+		return cloudPins{}, fmt.Errorf("the provider is not registered with Harness right now (state %s): start `amux cloud run` and wait until `amux doctor` shows it registered, or %s", orNone(st.State), cloudPinsOverride)
 	case !alive(st.PID):
-		return cloudPins{}, fmt.Errorf("the provider recorded as registered (pid %d) is no longer running: start `amux provide` and wait until `amux doctor` shows it registered, or %s", st.PID, cloudPinsOverride)
+		return cloudPins{}, fmt.Errorf("the provider recorded as registered (pid %d) is no longer running: start `amux cloud run` and wait until `amux doctor` shows it registered, or %s", st.PID, cloudPinsOverride)
 	case st.OwnerUserID == "":
-		return cloudPins{}, fmt.Errorf("Harness reported no owner for provider %s: direct enrollment needs a provider registered to your account (not shared or unowned), and a Harness that reports registration owners. Restart `amux provide` after upgrading Harness, or %s", st.ProviderID, cloudPinsOverride)
+		return cloudPins{}, fmt.Errorf("Harness reported no owner for provider %s: direct enrollment needs a provider registered to your account (not shared or unowned), and a Harness that reports registration owners. Restart `amux cloud run` after upgrading Harness, or %s", st.ProviderID, cloudPinsOverride)
 	}
 	if prov != "" && prov != st.ProviderID {
 		return cloudPins{}, fmt.Errorf("--provider %s is not this host's registered provider %s; the owner cannot be derived for a different provider: %s", prov, st.ProviderID, cloudPinsOverride)
@@ -97,11 +97,11 @@ func (p cloudPins) describe() string {
 		p.State, ago(p.Registered), orNone(p.Origin), account, p.Provider)
 }
 
-// cloudPinDrift explains, for `amux direct cloud status`, an enabled policy
+// cloudPinDrift explains, for `amux cloud enroll status`, an enabled policy
 // whose pins no longer match this host's latest provider registration — the
 // usual cause of owner_mismatch/provider_mismatch after Harness reassigns or
 // recreates the provider. It never changes the policy; re-pinning is an
-// explicit `amux direct cloud enable`.
+// explicit `amux cloud enroll enable`.
 func cloudPinDrift(c direct.CloudStatus, st provider.Status, stErr error) string {
 	if !c.Enabled || stErr != nil || st.ProviderID == "" {
 		return ""
@@ -109,6 +109,6 @@ func cloudPinDrift(c direct.CloudStatus, st provider.Status, stErr error) string
 	if st.ProviderID == c.ProviderPin && (st.OwnerUserID == "" || st.OwnerUserID == c.OwnerPin) {
 		return ""
 	}
-	return fmt.Sprintf("  ⚠ pins differ from this host's provider registration (owner %s, provider %s): issuance will refuse until you re-run amux direct cloud enable",
+	return fmt.Sprintf("  ⚠ pins differ from this host's provider registration (owner %s, provider %s): issuance will refuse until you re-run amux cloud enroll enable",
 		orNone(st.OwnerUserID), st.ProviderID)
 }

@@ -23,7 +23,7 @@ type RepoNotGrantedError struct {
 func (e *RepoNotGrantedError) Error() string {
 	return fmt.Sprintf("repository %q is not granted to workgroup %s (or is not tracked on this host): "+
 		"`amux repo ls` lists every tracked repo and marks the granted ones; "+
-		"the host can widen this workgroup's grants with `amux workgroup grants %s --all` (or `... %s <repo>...`)",
+		"the host can widen this workgroup's grants with `amux repo grant %s --all` (or `... %s <repo>...`)",
 		e.Repo, e.Workgroup, e.Workgroup, e.Workgroup)
 }
 

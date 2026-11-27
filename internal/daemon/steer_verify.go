@@ -16,7 +16,7 @@ import (
 // The start used to be fire-and-forget: the verb answered "ok" the moment the
 // cold start was queued, and every later outcome (a launch error, a runtime that
 // exited while booting, text typed into a TUI that never painted its composer)
-// reached only the session journal. The CLI caller saw "ok", `amux status` kept
+// reached only the session journal. The CLI caller saw "ok", `amux ls` kept
 // showing the agent stopped, and the next interject was refused as "not
 // running" (2026-11-23, coordinators 5a3b1a, e06ffd and 7ad904).
 //
@@ -131,7 +131,7 @@ func (d *Daemon) awaitPromptAck(ctx context.Context, id string, in engine.Instan
 		}
 		select {
 		case <-deadline.C:
-			return fmt.Errorf("agent %s started but did not acknowledge the prompt within %v; it is running, so retry with verb=interject or check `amux status`", id, d.verifyTimeout())
+			return fmt.Errorf("agent %s started but did not acknowledge the prompt within %v; it is running, so retry with verb=interject or check `amux ls`", id, d.verifyTimeout())
 		case <-tick.C:
 		case <-ctx.Done():
 			return fmt.Errorf("prompt to %s: %w", id, ctx.Err())

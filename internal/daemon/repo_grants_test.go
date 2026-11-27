@@ -80,7 +80,7 @@ func TestCoordinatorRepoVisibilityIsNotAuthority(t *testing.T) {
 		if err := json.Unmarshal(result.Body, &body); err != nil {
 			t.Fatalf("denial body: %v", err)
 		}
-		if !strings.Contains(body.Error, `"`+repo+`"`) || !strings.Contains(body.Error, "amux workgroup grants wg") {
+		if !strings.Contains(body.Error, `"`+repo+`"`) || !strings.Contains(body.Error, "amux repo grant wg") {
 			t.Fatalf("denial message %q does not name %s and the host grants command", body.Error, repo)
 		}
 	}

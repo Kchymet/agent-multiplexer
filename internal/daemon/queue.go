@@ -379,7 +379,7 @@ func (d *Daemon) findQueueEntry(id string) (queue.Entry, bool) {
 func (d *Daemon) handleQueueAction(ctx context.Context, a core.Action) core.Result {
 	id := strings.TrimSpace(a.Fields[core.QueueEntryField])
 	if id == "" {
-		return fail("%s needs -f %s=<entry id> (amux queue list)", a.Action, core.QueueEntryField)
+		return fail("%s needs -f %s=<entry id> (amux inbox ls)", a.Action, core.QueueEntryField)
 	}
 	now := time.Now()
 	e, found := d.findQueueEntry(id)
@@ -387,7 +387,7 @@ func (d *Daemon) handleQueueAction(ctx context.Context, a core.Action) core.Resu
 		if d.queue.wasAnswered(id, now) {
 			return core.Result{Type: "result", Code: codeAnswered, Error: fmt.Sprintf("queue entry %s was already answered", id)}
 		}
-		return core.Result{Type: "result", Code: codeAskerGone, Error: fmt.Sprintf("queue entry %s is no longer open (the question was answered, replaced or its session went away); `amux queue list` shows what is open, and you can still prompt the session directly", id)}
+		return core.Result{Type: "result", Code: codeAskerGone, Error: fmt.Sprintf("queue entry %s is no longer open (the question was answered, replaced or its session went away); `amux inbox ls` shows what is open, and you can still prompt the session directly", id)}
 	}
 	if a.Action == core.ActionQueueDismiss {
 		if e.Kind == queue.KindDecision {

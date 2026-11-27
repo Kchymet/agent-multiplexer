@@ -10,7 +10,7 @@ import (
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// `amux provide` routes every session-facing hook through the shared host
+// `amux cloud` routes every session-facing hook through the shared host
 // backend, and the publication grants still decide which hooks exist.
 func TestWireHostBackendRoutesPublishedHooks(t *testing.T) {
 	snap, verb, rec, acct := hostbackendtest.New("snap"), hostbackendtest.New("verb"), hostbackendtest.New("rec"), hostbackendtest.New("acct")

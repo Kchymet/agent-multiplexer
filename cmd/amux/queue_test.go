@@ -47,7 +47,7 @@ func TestRenderQueueFlattensAgentText(t *testing.T) {
 	var b bytes.Buffer
 	renderQueue(&b, ov)
 	out := b.String()
-	for _, want := range []string{"1 need you", "2 open", "amux queue answer p-1 --allow | --deny", "--choice <label>", "amux queue ack it-00000001", "needs_you"} {
+	for _, want := range []string{"1 need you", "2 open", "amux inbox answer p-1 --allow | --deny", "--choice <label>", "amux inbox ack it-00000001", "needs_you"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q:\n%s", want, out)
 		}

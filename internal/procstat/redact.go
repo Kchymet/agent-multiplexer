@@ -26,7 +26,7 @@ var (
 // redactArgv returns argv with the values of secret-looking flags, key=value
 // pairs, headers and well-known token shapes replaced. It is applied to every
 // command line the sampler publishes (Process.Cmd), which reaches `amux top
-// --json` and `amux status --json`; attribution uses the raw argv, which never
+// --json` and `amux ls --json`; attribution uses the raw argv, which never
 // leaves the sampler. It errs towards over-redacting: a --password-file path
 // is hidden too.
 func redactArgv(argv []string) []string {

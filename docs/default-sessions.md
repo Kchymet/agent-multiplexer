@@ -26,7 +26,7 @@ coordinator, including workgroups limited to a single repo.
 - **The overseer** is the coordinator of coordinators. It supervises every
   workgroup coordinator, owns the cross-workgroup item inbox (the global
   inbox, [items.md](items.md)) and curates the user question queue
-  (`amux queue`). It can read every workgroup, steer and start coordinators,
+  (`amux inbox`). It can read every workgroup, steer and start coordinators,
   archive finished workgroups (never forced), create a workgroup from an item the
   user acknowledged, and triage items — and nothing administrative (see
   [workgroup-permissions.md](workgroup-permissions.md)). When it needs an admin
@@ -52,7 +52,7 @@ coordinator, including workgroups limited to a single repo.
 ## Legacy one-off migration
 
 `new-repo-agent` is retired and returns guidance without creating a session.
-`amux workgroup repo <repo>` and the TUI repo shortcut use the normal constructor.
+`amux new --repo <repo>` and the TUI repo shortcut use the normal constructor.
 Writable store opening promotes legacy hidden wrappers to visible workgroups,
 retaining root/member IDs, member directories, branches, conversations and archive
 state. The old container and all its files stay in place; a dedicated
@@ -68,7 +68,7 @@ Only an explicit host grant update can expand a fixed ceiling. A workgroup
 created without naming repos holds the all-tracked ceiling instead: it follows
 the host's tracked repos as they are added and removed. Existing ceilings are never
 rewritten: the host adjusts any workgroup's ceiling at any time with
-`amux workgroup grants <id> [--all | --none | repo...]`, effective immediately.
+`amux repo grant <id> [--all | --none | repo...]`, effective immediately.
 
 ## Scope
 
@@ -163,7 +163,7 @@ that supervises exactly that natively: Codex's App Server thread goal
   expected, with the reason. It then ends
   by asking the user whether to archive the workgroup or give it another task. After explicit user confirmation,
   the coordinator can run `amux agent done` to archive its workgroup and members.
-  The host can also archive it (`x` on the rail, `amux workgroup archive <id>`).
+  The host can also archive it (`x` on the rail, `amux archive <id>`).
   Both stop runtimes and revoke credentials; transcripts and worktrees remain.
   Only the host can restore: restoring the workgroup also restores its previously
   active members. Already-completed members stay archived.

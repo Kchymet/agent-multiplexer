@@ -523,7 +523,7 @@ func awaitDaemonReady(initialErr error, exited <-chan error, budget time.Duratio
 // agents, so quitting the TUI just detaches and the agents keep running.
 //
 // focusID, when set, is the workgroup or agent the dashboard opens on (what
-// `amux workgroup open <id>` passes); empty just opens the dashboard.
+// `amux open <id>` passes); empty just opens the dashboard.
 func cmdNative(focusID string) error {
 	self, err := os.Executable()
 	if err != nil {
@@ -540,10 +540,15 @@ func cmdNative(focusID string) error {
 // raw snapshot (every Session field); otherwise an aligned plain-text table. It
 // reads the daemon's canonical state, never the store.
 func cmdStatus(args []string) error {
-	asJSON := false
+	asJSON, all := false, false
 	for _, a := range args {
-		if a == "--json" || a == "-j" {
+		switch a {
+		case "--json", "-j":
 			asJSON = true
+		case "--all", "-a":
+			all = true
+		default:
+			return usagef("unknown flag %q", a)
 		}
 	}
 	if sessionContextRestricted() {
@@ -574,13 +579,7 @@ func cmdStatus(args []string) error {
 			fmt.Println("(no visible sessions)")
 			return nil
 		}
-		for _, s := range sessions {
-			state := s.State
-			if state == "" || state == core.StateIdle {
-				state = core.StateStopped
-			}
-			fmt.Printf("%-20s %-8s %-8s %s%s\n", s.Title, s.Kind, state, s.Cwd, statusEnrichment(s))
-		}
+		renderLs(os.Stdout, sessions, all, workgroupGrants())
 		return nil
 	}
 	c, err := startupDial()
@@ -615,16 +614,10 @@ func cmdStatus(args []string) error {
 		// stderr, so the plain table stays parseable.
 		defer printPendingUpdate()
 		if len(f.Snapshot.Sessions) == 0 {
-			fmt.Println("(no workgroups — `amux workgroup new`)")
+			fmt.Println("(no workgroups — `amux new`)")
 			return nil
 		}
-		for _, s := range f.Snapshot.Sessions {
-			state := s.State
-			if state == "" || state == core.StateIdle {
-				state = core.StateStopped
-			}
-			fmt.Printf("%-20s %-8s %-8s %s%s\n", s.Title, s.Kind, state, s.Cwd, statusEnrichment(s))
-		}
+		renderLs(os.Stdout, f.Snapshot.Sessions, all, workgroupGrants())
 		return nil
 	}
 }

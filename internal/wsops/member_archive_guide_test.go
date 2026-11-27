@@ -24,7 +24,7 @@ func TestCoordinatorGuideExpectsArchivingFinishedMembers(t *testing.T) {
 			"A member is **finished** when its PR is merged or closed (see \"Track every member PR to merged or closed\"), or its task was delivered with no PR, and you will not give it more work.",
 			"A member that still owns an open PR is not finished: never archive it.",
 			"Archive it then, during the task",
-			"amux do set-archived <member> -f archived=true",
+			"amux archive <member>",
 			"never archive a member while it is running",
 			"Before you report a task complete (and before marking a goal complete), archive every finished member",
 			"Keep a finished member only if you expect to reuse it",

@@ -1,0 +1,5 @@
+amux open — open the dashboard on a workgroup or agent
+
+usage: amux open <id>
+
+Starts it if it is stopped, as picking it in the rail does. Needs a terminal.

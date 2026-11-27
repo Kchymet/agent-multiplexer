@@ -27,7 +27,7 @@ func parseInstall(t *testing.T, base providercfg.Config, argv ...string) provide
 	return base
 }
 
-// TestInstallMergesOverTheExistingConfig is what makes `amux provide install`
+// TestInstallMergesOverTheExistingConfig is what makes `amux cloud connect`
 // safe to re-run: changing one setting must not silently forget the rest.
 func TestInstallMergesOverTheExistingConfig(t *testing.T) {
 	base := providercfg.Config{
@@ -247,14 +247,14 @@ func TestEnsureTokenFile(t *testing.T) {
 // nothing.
 func TestProvideRunNeedsAnOrchestrator(t *testing.T) {
 	sandboxCLI(t)
-	err := runCommand(t, lookupCommand("provide"), nil)
-	if err == nil || !strings.Contains(err.Error(), "amux provide install") {
-		t.Errorf("bare `amux provide` = %v, want it to name the install command", err)
+	err := runCommand(t, lookupCommand("cloud"), []string{"run"})
+	if err == nil || !strings.Contains(err.Error(), "amux cloud connect") {
+		t.Errorf("`amux cloud run` = %v, want it to name the install command", err)
 	}
 }
 
 // TestProvideRunReadsTheConfigFile is the property the user service depends on:
-// the unit runs a bare `amux provide`, so everything must come from the file.
+// the unit runs a `amux cloud run`, so everything must come from the file.
 func TestProvideRunReadsTheConfigFile(t *testing.T) {
 	sandboxCLI(t)
 	if err := providercfg.Save(providercfg.Config{
@@ -264,9 +264,9 @@ func TestProvideRunReadsTheConfigFile(t *testing.T) {
 	}
 	// The address resolves from the file (no "need an orchestrator address"), and
 	// the run stops at the unreadable token rather than dialing without one.
-	err := runCommand(t, lookupCommand("provide"), nil)
+	err := runCommand(t, lookupCommand("cloud"), []string{"run"})
 	if err == nil || !strings.Contains(err.Error(), "read token file") {
-		t.Errorf("`amux provide` = %v, want it to get past the address and fail on the token", err)
+		t.Errorf("`amux cloud run` = %v, want it to get past the address and fail on the token", err)
 	}
 }
 

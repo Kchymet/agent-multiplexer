@@ -105,7 +105,7 @@ func cmdConfig(args []string) error {
 		}
 		if harness, ok := authSetting(args[1]); ok {
 			if args[2] != amuxcfg.AuthCentral {
-				return fmt.Errorf("%s is retired: every workload follows the central login; run `amux auth login %s`", args[1], harness)
+				return fmt.Errorf("%s is retired: every workload follows the central login; run `amux harness login %s`", args[1], harness)
 			}
 			if err := amuxcfg.SetAuthMode(harness, args[2]); err != nil {
 				return err
@@ -124,7 +124,7 @@ func cmdConfig(args []string) error {
 			return nil
 		}
 		if args[1] == directsvc.EnabledKey {
-			return fmt.Errorf("%s is changed with amux direct enable|disable, which validate the listener settings first", directsvc.EnabledKey)
+			return fmt.Errorf("%s is changed with amux device enable|disable, which validate the listener settings first", directsvc.EnabledKey)
 		}
 		if harnessbin.IsSettingKey(args[1]) {
 			if args[2] == "" {
@@ -285,9 +285,9 @@ func configList() error {
 	case directErr != nil:
 		fmt.Printf("%s INVALID\n", directsvc.EnabledKey)
 	case !directSet:
-		fmt.Printf("%s off  (default; amux direct enable|disable — applied by the running daemon)\n", directsvc.EnabledKey)
+		fmt.Printf("%s off  (default; amux device enable|disable — applied by the running daemon)\n", directsvc.EnabledKey)
 	default:
-		fmt.Printf("%s %s  (saved; amux direct enable|disable — applied by the running daemon)\n", directsvc.EnabledKey, onOff(direct.Enabled))
+		fmt.Printf("%s %s  (saved; amux device enable|disable — applied by the running daemon)\n", directsvc.EnabledKey, onOff(direct.Enabled))
 	}
 	var harnessErr error
 	for _, key := range harnessbin.SettingKeys() {
@@ -359,7 +359,7 @@ func authApplyHint(harness string) string {
 	if harness == "codex" {
 		return "run amux daemon restart to apply"
 	}
-	return "applies to Claude panes started from now on; amux auth restart restarts idle ones"
+	return "applies to Claude panes started from now on; amux harness auth restart restarts idle ones"
 }
 
 // keyPath resolves a CLI settings path to a keymap action. The "keys."

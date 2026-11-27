@@ -52,7 +52,7 @@ func printDirectClients(out io.Writer, serverID string, clients []direct.ClientI
 			strings.Join(c.Permissions, ","), directScopeString(c.ResourceScope), state)
 	}
 	if stale {
-		fmt.Fprintln(out, "Revoke the ones you no longer use: amux direct clients revoke <client-id>")
+		fmt.Fprintln(out, "Revoke the ones you no longer use: amux device revoke <client-id>")
 	}
 }
 
@@ -64,21 +64,21 @@ func directActor() string {
 	return "cli"
 }
 
-// runDirectClientsUpdate is `amux direct clients update <client-id>
+// runDirectClientsUpdate is `amux device ls update <client-id>
 // [--permissions <list>] [--all-sessions | --workgroup <id>...] [--json]`.
 func runDirectClientsUpdate(args []string, out io.Writer, admin func(direct.AdminRequest) (direct.AdminResponse, error)) error {
-	const usage = "usage: amux direct clients update <client-id> [--permissions <list>] [--all-sessions | --workgroup <root-id>...] [--json]"
+	const usage = "usage: amux device ls update <client-id> [--permissions <list>] [--all-sessions | --workgroup <root-id>...] [--json]"
 	id := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		id, args = args[0], args[1:]
 	}
-	fs := newCmdFlagSet("direct clients update")
+	fs := newCmdFlagSet("device update")
 	var groups multiFlag
 	perms := fs.String("permissions", "", "")
 	all := fs.Bool("all-sessions", false, "")
 	asJSON := fs.Bool("json", false, "")
 	fs.Var(&groups, "workgroup", "")
-	if err := parseCmdFlags(fs, "direct clients update", args); err != nil {
+	if err := parseCmdFlags(fs, "device update", args); err != nil {
 		return err
 	}
 	switch {
@@ -110,7 +110,7 @@ func runDirectClientsUpdate(args []string, out io.Writer, admin func(direct.Admi
 	resp, err := admin(direct.AdminRequest{Op: direct.OpUpdate, Update: &u, Actor: directActor()})
 	if err != nil && resp.Update == nil {
 		if strings.Contains(err.Error(), "unknown admin operation") {
-			return errors.New("the running direct server predates grant updates; restart it (amux direct disable && amux direct enable) and retry")
+			return errors.New("the running direct server predates grant updates; restart it (amux device disable && amux device enable) and retry")
 		}
 		return err
 	}

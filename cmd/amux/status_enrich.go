@@ -8,7 +8,7 @@ import (
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// statusEnrichment is the `amux status` table's trailing note for a row (""
+// statusEnrichment is the `amux ls` table's trailing note for a row (""
 // for none): a workgroup's rollup when enrichments are what it waits on (or
 // their data is stale), a member's open enrichments of every kind.
 func statusEnrichment(s core.Session) string {

@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// ServeConfig is `amux direct serve`.
+// ServeConfig is `amux device serve`.
 type ServeConfig struct {
 	Root            string
 	Listen          string // ip:port
@@ -66,7 +66,7 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	}
 	a, err := OpenAuthority(cfg.Root, cfg.Life, nil)
 	if errors.Is(err, ErrStoreBusy) {
-		return errors.New("another `amux direct serve` already owns the direct store")
+		return errors.New("another `amux device serve` already owns the direct store")
 	}
 	if err != nil {
 		return err

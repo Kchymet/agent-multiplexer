@@ -47,7 +47,7 @@ func TestMoveAgentTargetsWorkgroupsOnly(t *testing.T) {
 	if _, err := MoveAgent(ctx, member.ID, webOnly); err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Fatalf("move into a workgroup limited to another repo = %v", err)
 	}
-	if _, err := MoveAgent(ctx, member.ID, "nope"); err == nil || !strings.Contains(err.Error(), "amux workgroup ls") {
+	if _, err := MoveAgent(ctx, member.ID, "nope"); err == nil || !strings.Contains(err.Error(), "amux ls") {
 		t.Fatalf("move into an unknown workgroup = %v", err)
 	}
 	created, err := ApplyResult(ctx, core.Action{Action: core.ActionMove, ID: member.ID})

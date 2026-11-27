@@ -8,7 +8,7 @@ verbs (§3.1) are part of the `sessions` feature and are implemented, delivered 
 keystroke to the agent's PTY; a daemon that does not implement a verb answers
 `unsupported verb` (§3.2). Extends `docs/remote-provider.md`.
 
-Provider mode (`amux provide`) lets a remote orchestrator use this machine as
+Provider mode (`amux cloud`) lets a remote orchestrator use this machine as
 compute (with Harness, as your personal compute pool): it spawns panes here and
 streams their I/O. This document specifies an **optional, additive extension**
 on the same dialed connection: publishing this daemon's own *session inventory*
@@ -765,7 +765,7 @@ because both start from the same fresh numbering.
 
 ## 6. Configuration
 
-The feature is off by default. Enable it on `amux provide`:
+The feature is off by default. Enable it on `amux cloud run`:
 
 | Flag | Env | Effect |
 | --- | --- | --- |
@@ -786,14 +786,14 @@ creation no longer uses those opaque strings: the registration's verified
 `capabilities.execution` block names the harnesses the provider can run. See
 "Verified agent runtimes for remote creation" in `docs/remote-provider.md`.
 
-Every relayed verb leaves one line on `amux provide`'s stderr, before the reply
+Every relayed verb leaves one line on `amux cloud run`'s stderr, before the reply
 is written, so an operator can answer "did it reach this machine, and how long
 did it take here?" without instrumenting anything:
 
 ```
-amux provide: session-action prompt id=a1 accepted in 4ms
-amux provide: session-action add-agent id=wg1 applied in 21ms (created a7)
-amux provide: session-action spawn id=a1 failed in 0s: unsupported
+amux cloud run: session-action prompt id=a1 accepted in 4ms
+amux cloud run: session-action add-agent id=wg1 applied in 21ms (created a7)
+amux cloud run: session-action spawn id=a1 failed in 0s: unsupported
 ```
 
 The line names the session, the verb, the disposition (§2) and the elapsed

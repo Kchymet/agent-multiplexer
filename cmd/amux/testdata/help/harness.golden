@@ -1,0 +1,41 @@
+amux harness — Claude Code / Codex installs and logins
+
+usage: amux harness [<command>]
+
+<kind> is claude or codex. amux downloads the official native builds (Claude
+Code's release bucket, Codex's GitHub release package), verifies their SHA-256,
+and keeps each version in its own directory under
+~/.local/share/amux/harnesses/<kind>/<version>, with a "current" link that
+update/pin/rollback swap atomically. New sessions get the current version;
+running sessions are restarted onto it when idle between turns, resuming their
+conversations (harnesses.restart_sessions off keeps them on their version).
+
+Binary resolution: AMUX_<KIND>_BIN, then config harnesses.<kind>.bin, then the
+amux-managed install, then your own install on PATH. Settings (amux config):
+  harnesses.update off|notify|auto   daemon-scheduled adoption + updates (default auto;
+                                     AMUX_NO_HARNESS_AUTO_UPDATE=1 turns it off)
+  harnesses.restart_sessions on|off  restart idle running sessions onto a new version (default on)
+  harnesses.check_interval <dur>     how often it runs (default 24h, min 1h)
+  harnesses.<kind>.channel <ch>      release channel to follow (claude: stable|latest)
+  harnesses.<kind>.bin <path>        explicit binary override
+amux disables the harnesses' own self-updaters in sessions it launches.
+
+commands:
+  ls                      which binary each harness launches, installed versions, updates (the default)
+  install <kind> [<version>|stable|latest] [--no-activate]
+                          download and activate a version
+  update [<kind>...]      install and activate the newest release (skips pinned harnesses)
+  pin <kind> [<version>]  activate and freeze a version (default: the current one)
+  unpin <kind>            allow updates again
+  rollback <kind>         re-activate the previously active version
+  check [<kind>...]       look for a newer release without installing it
+  gc [<kind>...]          delete versions not current, previous, pinned or running
+  uninstall <kind>        remove amux's install; launches fall back to your PATH
+  adopt [--dry-run]       install a managed copy of each harness you already use (what the daemon does)
+  login [claude|codex] [--api-key] [--token-stdin]
+                          create or replace a harness's central login
+  logout <claude|codex>   fence delivery and clear a harness's central login
+  auth <command>          central logins: status, accounts, default, rebind, restart
+  sandbox [<command>]     each agent's private copy of your harness config: drift, promote, reset
+
+Run 'amux harness <command> --help' for details.

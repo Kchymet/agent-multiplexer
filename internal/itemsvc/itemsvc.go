@@ -2,7 +2,7 @@
 // joins the item store (internal/store) with the access rules
 // (internal/access, items.go) so every caller — the daemon's authenticated
 // session RPC, the host control socket, and later surfaces such as a global
-// inbox view or `amux status` — raises, lists and moves items through one set of
+// inbox view or `amux ls` — raises, lists and moves items through one set of
 // checks.
 //
 // Every method takes the id of the session acting. The service resolves it

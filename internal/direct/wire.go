@@ -181,7 +181,7 @@ const (
 	CodeAuthExpired = "auth.expired"
 	CodeAuthRevoked = "auth.revoked"
 	// CodeGrantChanged ends a stream or an in-flight request whose grant the
-	// host narrowed (amux direct clients update). The credential is still
+	// host narrowed (amux device ls update). The credential is still
 	// good: renew if needed, re-read capabilities and reconnect; a request
 	// the new grant no longer allows then answers denied. Older clients treat
 	// an unknown stream auth code as auth.expired (renew and reattach), which
@@ -561,7 +561,7 @@ type CapabilitiesResponse struct {
 }
 
 // GrantInfo is a client's view of its own grant (CapabilitiesResponse.Grant).
-// The grant may change in place (amux direct clients update): narrowing ends
+// The grant may change in place (amux device ls update): narrowing ends
 // the client's open streams with auth.grant_changed, widening applies to its
 // next request. UpdatedAt is the latest change (0: never changed since
 // enrollment); a client re-reads capabilities after a grant_changed end or a

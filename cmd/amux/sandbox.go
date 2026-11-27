@@ -29,7 +29,7 @@ func cmdSandbox(args []string) error {
 		args = args[1:]
 	}
 	if isHelpFlag(sub) {
-		return showHelp("sandbox")
+		return showHelp("harness sandbox")
 	}
 	switch sub {
 	case "drift", "changes", "ls", "list":
@@ -82,7 +82,7 @@ func sandboxAgents(id string) ([]sandboxAgent, error) {
 		}
 	}
 	if id != "" && len(sessions) == 0 {
-		return nil, fmt.Errorf("no such agent %q\n  `amux workgroup ls` lists them", id)
+		return nil, fmt.Errorf("no such agent %q\n  `amux ls` lists them", id)
 	}
 	var out []sandboxAgent
 	for _, s := range sessions {
@@ -134,7 +134,7 @@ func sandboxDrift(args []string) error {
 	var rows []driftRow
 	for i, r := range results {
 		if r.Err != nil {
-			fmt.Fprintf(os.Stderr, "amux sandbox: %s (%s): %v\n", refs[i].id, refs[i].spec.Kind, r.Err)
+			fmt.Fprintf(os.Stderr, "amux harness sandbox: %s (%s): %v\n", refs[i].id, refs[i].spec.Kind, r.Err)
 			continue
 		}
 		if len(r.Changes) == 0 && id == "" {
@@ -164,7 +164,7 @@ func sandboxDrift(args []string) error {
 			fmt.Printf("    %s\n", c)
 		}
 	}
-	fmt.Printf("\npropagate:  amux sandbox promote <id> <path>    discard:  amux sandbox reset <id> <path>\n")
+	fmt.Printf("\npropagate:  amux harness sandbox promote <id> <path>    discard:  amux harness sandbox reset <id> <path>\n")
 	return nil
 }
 
@@ -172,7 +172,7 @@ func sandboxDrift(args []string) error {
 // agent's harness copies covers it.
 func sandboxApply(args []string, verb string, apply func(cfghome.Spec, string) error) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: amux sandbox %s <id> <path>", verb)
+		return fmt.Errorf("usage: amux harness sandbox %s <id> <path>", verb)
 	}
 	id, rel := args[0], args[1]
 	agents, err := sandboxAgents(id)
@@ -199,7 +199,7 @@ func sandboxApply(args []string, verb string, apply func(cfghome.Spec, string) e
 
 func sandboxPath(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: amux sandbox path <id>")
+		return fmt.Errorf("usage: amux harness sandbox path <id>")
 	}
 	agents, err := sandboxAgents(args[0])
 	if err != nil {
@@ -219,7 +219,7 @@ func sandboxPath(args []string) error {
 // sandboxDriftSummary counts agent/path differences awaiting a decision, not
 // editing actions. Query or scan failures must not be reported as a clean check.
 // Archived agents are included on purpose: archiving keeps the copy and its
-// manifest, `amux sandbox promote/reset <id>` still resolves the archived id,
+// manifest, `amux harness sandbox promote/reset <id>` still resolves the archived id,
 // and the agent can be restored — their edits stay actionable until the agent
 // is deleted.
 func sandboxDriftSummary(progress func(done, total int)) (agents, edits int, err error) {
@@ -236,7 +236,7 @@ func sandboxDriftSummary(progress func(done, total int)) (agents, edits int, err
 	return cfghome.DriftSummary(specs, cfghome.ScanOptions{Progress: progress})
 }
 
-// driftProgress is `amux sandbox drift`'s progress on stderr: none with --json,
+// driftProgress is `amux harness sandbox drift`'s progress on stderr: none with --json,
 // whose consumers read a clean machine-readable stream.
 func driftProgress(asJSON bool, w io.Writer, tty bool) func(done, total int) {
 	if asJSON {

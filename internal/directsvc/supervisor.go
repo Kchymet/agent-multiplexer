@@ -27,7 +27,7 @@ type Starter func(Settings) (Process, error)
 // when it exits, restarted when its configuration (or certificate) changes,
 // and stopped when the setting is turned off or the daemon stops.
 //
-// It polls the setting rather than taking a daemon RPC, so `amux direct
+// It polls the setting rather than taking a daemon RPC, so `amux device
 // enable|disable` is a write to config.json plus a wait on the status file —
 // the same file a reader would use to check the outcome — and there is no new
 // privileged daemon surface.

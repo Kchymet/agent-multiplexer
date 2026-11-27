@@ -102,7 +102,7 @@ func launchGuidance(err error) string {
 	}
 	switch failure {
 	case fetchMissing:
-		return "No central Claude login is configured. Run `amux auth login claude` in a trusted host terminal."
+		return "No central Claude login is configured. Run `amux harness login claude` in a trusted host terminal."
 	case fetchDenied:
 		return "Claude credential access was denied. Check this workload's authorization in amux; logging in does not restore revoked access."
 	case fetchBlocked:

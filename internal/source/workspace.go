@@ -533,9 +533,9 @@ func noticeSuffix(s store.Session) string {
 // configSuffix flags an agent that has edited its private harness config (its
 // copy of the user's ~/.claude / $CODEX_HOME template) so the change is visible
 // on the rail as soon as the daemon's poll sees it — the feedback loop that lets
-// the user decide whether to propagate it (`amux sandbox drift`). Only edits
+// the user decide whether to propagate it (`amux harness sandbox drift`). Only edits
 // awaiting a decision count; a template the user changed under the agent is not
-// the agent's doing and is left to `amux sandbox drift` to list.
+// the agent's doing and is left to `amux harness sandbox drift` to list.
 func configSuffix(s store.Session) string {
 	spec, ok := agent.HarnessFor(s.Agent).Config(s)
 	if !ok {

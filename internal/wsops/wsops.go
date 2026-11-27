@@ -191,7 +191,7 @@ func AddAgent(ctx context.Context, rootID string, spec AgentSpec) (store.Session
 	defer db.Close()
 	root, ok, _ := db.GetSession(rootID)
 	if !ok || !root.IsRoot() {
-		return store.Session{}, fmt.Errorf("no such workgroup %q\n  `amux workgroup ls` lists them", rootID)
+		return store.Session{}, fmt.Errorf("no such workgroup %q\n  `amux ls` lists them", rootID)
 	}
 	s, _, err := addAgent(ctx, db, rootID, spec, "")
 	return s, err
@@ -470,7 +470,7 @@ func AgentIDsUnder(id string) ([]string, error) {
 		return nil, err
 	}
 	if !ok {
-		return nil, fmt.Errorf("no such workgroup or agent %q\n  `amux workgroup ls` lists them", id)
+		return nil, fmt.Errorf("no such workgroup or agent %q\n  `amux ls` lists them", id)
 	}
 	if !s.IsRoot() || s.Role() == store.RoleConsole || s.Role() == store.RoleRepo {
 		return []string{s.ID}, nil
@@ -652,7 +652,7 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) (string, error
 	} else {
 		target, ok, _ := db.GetSession(targetRootID)
 		if !ok || !target.IsRoot() {
-			return "", fmt.Errorf("no such workgroup %q\n  `amux workgroup ls` lists them", targetRootID)
+			return "", fmt.Errorf("no such workgroup %q\n  `amux ls` lists them", targetRootID)
 		}
 		if target.Role() == store.RoleRepo {
 			return "", fmt.Errorf("%q is repo %s's home session, not a workgroup; move into a workgroup granted that repo, or omit the target to make a new one", targetRootID, target.Repo)
@@ -879,7 +879,7 @@ func DeleteByID(ctx context.Context, id string) error {
 	defer db.Close()
 	s, ok, err := db.GetSession(id)
 	if err != nil || !ok {
-		return fmt.Errorf("no such workgroup or agent %q\n  `amux workgroup ls` lists them", id)
+		return fmt.Errorf("no such workgroup or agent %q\n  `amux ls` lists them", id)
 	}
 	if s.IsRoot() {
 		if s.Role() == store.RoleRepo {
@@ -1036,7 +1036,7 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		// Nothing is created: a one-off agent on a repo no longer exists. The
 		// caller is told how the same work is started now.
 		repo := defaultStr(a.ID, "<repo>")
-		return "", fmt.Errorf("%q was removed: amux is workgroups-only — create a workgroup limited to the repo instead\n  amux do new-workgroup -f repos=%s -f prompt=\"…\"   (or: amux workgroup repo %s)",
+		return "", fmt.Errorf("%q was removed: amux is workgroups-only — create a workgroup limited to the repo instead\n  amux new \"…\" --repo %s   (or: amux do new-workgroup -f repos=%s -f prompt=\"…\")",
 			actionNewRepoAgentLegacy, repo, repo)
 	case core.ActionAddAgent:
 		ident, err := applyAddAgent(ctx, a, "")
@@ -1116,7 +1116,7 @@ func applyAddAgent(ctx context.Context, a core.Action, expectRoot string) (store
 		if expectRoot != "" {
 			return store.Identity{}, store.ErrRootChanged
 		}
-		return store.Identity{}, fmt.Errorf("no such workgroup %q\n  `amux workgroup ls` lists them", a.ID)
+		return store.Identity{}, fmt.Errorf("no such workgroup %q\n  `amux ls` lists them", a.ID)
 	}
 	_, ident, err := addAgent(ctx, db, a.ID, AgentSpec{
 		Agent:  agentOf(a.Fields),
@@ -1188,7 +1188,7 @@ func SetArchived(ctx context.Context, id string, archived bool) error {
 	defer db.Close()
 	s, ok, err := db.GetSession(id)
 	if err != nil || !ok {
-		return fmt.Errorf("no such workgroup or agent %q\n  `amux workgroup ls` lists them", id)
+		return fmt.Errorf("no such workgroup or agent %q\n  `amux ls` lists them", id)
 	}
 	if !archived && !s.IsRoot() {
 		parent, found, err := db.GetSession(s.RootID)
@@ -1251,7 +1251,7 @@ func Rename(id, name string) error {
 	}
 	defer db.Close()
 	if _, ok, err := db.GetSession(id); err != nil || !ok {
-		return fmt.Errorf("no such workgroup or agent %q\n  `amux workgroup ls` lists them", id)
+		return fmt.Errorf("no such workgroup or agent %q\n  `amux ls` lists them", id)
 	}
 	// Field-scoped write: only the name column, so a rename can't clobber a
 	// concurrent claude-id adoption or archive of the same row.

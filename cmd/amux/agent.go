@@ -76,7 +76,7 @@ func cmdAgent(args []string) error {
 	case "done":
 		// Terminal self-report: the agent declares its task complete and archives
 		// itself off the active rail. The self-scoped analog of the management
-		// verb `amux workgroup archive <id>`, resolving the caller's own identity.
+		// verb `amux archive <id>`, resolving the caller's own identity.
 		return cmdAgentDone(args[1:])
 	case "", "help", "-h", "--help":
 		return showHelp("agent")
@@ -307,7 +307,7 @@ func cmdAgentPermission(args []string) error {
 // cmdAgentDone is the terminal self-report: an agent declares its task finished
 // and archives its own session so it drops off the active rail. For a coordinator,
 // after explicit user confirmation, this archives its workgroup and members. It is the
-// self-scoped form of the management verb `amux workgroup archive <id>` —
+// self-scoped form of the management verb `amux archive <id>` —
 // instead of taking an id, it resolves the caller's own store id solely from the
 // fixed authenticated session context.
 //
@@ -329,7 +329,7 @@ func cmdAgentDone(args []string) error {
 	}); err != nil {
 		return fmt.Errorf("amux agent done: archive %s: %w", id, err)
 	}
-	fmt.Printf("marked done: archived %s (reversible: amux workgroup unarchive %s)\n", id, id)
+	fmt.Printf("marked done: archived %s (reversible: amux unarchive %s)\n", id, id)
 	return nil
 }
 
@@ -345,7 +345,7 @@ func selfAgentID(args []string, load func() (access.SessionContext, error)) (str
 	}
 	context, err := load()
 	if err != nil || strings.TrimSpace(context.SubjectID) == "" {
-		return "", fmt.Errorf("%s", notInsideAgent("amux agent done", "amux workgroup archive <id>"))
+		return "", fmt.Errorf("%s", notInsideAgent("amux agent done", "amux archive <id>"))
 	}
 	return context.SubjectID, nil
 }

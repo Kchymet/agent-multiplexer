@@ -173,7 +173,7 @@ func TestFilterSnapshotUsesResolvedMembershipAndRemovesHostPaths(t *testing.T) {
 }
 
 // A finished coordinator archives its own workgroup from inside its session:
-// the exact action `amux agent done` (and `amux workgroup archive <own id>`)
+// the exact action `amux agent done` (and `amux archive <own id>`)
 // sends is allowed, while forcing past an open PR, archiving another
 // workgroup, and a member archiving its coordinator are refused.
 func TestCoordinatorSelfArchiveWrapUp(t *testing.T) {

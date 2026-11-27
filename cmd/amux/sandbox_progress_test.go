@@ -44,7 +44,7 @@ func TestScanProgressTerminalUpdatesAndClears(t *testing.T) {
 	}
 }
 
-// `amux sandbox drift --json` writes no progress at all, terminal or not.
+// `amux harness sandbox drift --json` writes no progress at all, terminal or not.
 func TestDriftProgressSilentForJSON(t *testing.T) {
 	for _, tty := range []bool{false, true} {
 		if p := driftProgress(true, &bytes.Buffer{}, tty); p != nil {

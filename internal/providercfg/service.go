@@ -36,8 +36,9 @@ var ErrUnsupported = errors.New("no user-service backend for this platform")
 // to both renderers, so one construction site produces the systemd unit and the
 // launchd plist alike.
 type Unit struct {
-	Exec       string            // absolute path to the amux binary
-	Args       []string          // arguments after the binary (normally just "provide")
+	Exec string   // absolute path to the amux binary
+	Args []string // arguments after the binary (normally just "provide"; the legacy spelling of amux cloud run,
+	// kept so a unit written by this binary still runs after a downgrade)
 	Config     string            // config file path, recorded in the unit header
 	LogPath    string            // launchd stdout/stderr sink (systemd uses the journal)
 	Env        map[string]string // extra environment for the service process

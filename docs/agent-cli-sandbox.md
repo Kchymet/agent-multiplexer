@@ -108,7 +108,7 @@ The overseer's column is in [Workgroup permissions](workgroup-permissions.md#con
 | --- | --- | --- | --- | --- |
 | query `version`, `codex-control` | session | yes | yes | Host paths and overrides stripped. |
 | query `agent-sessions` | session | yes | yes | Read-only discovery (see above). |
-| query `sessions`, `snapshot` (`amux status`), `repos` | filtered | itself; its own repos | workgroup + members (its own row carries its grants); every tracked repo, names only, each marked granted or not | Seeing a repo is not authority to fork it. |
+| query `sessions`, `snapshot` (`amux ls`), `repos` | filtered | itself; its own repos | workgroup + members (its own row carries its grants); every tracked repo, names only, each marked granted or not | Seeing a repo is not authority to fork it. |
 | query `runtime-events` (`amux agent events`) | workgroup | itself | itself, members (incl. archived members) | |
 | query `wait` (`amux agent wait`) | workgroup | itself | itself, members (incl. archived members) | |
 | query `items` (`amux agent items`) | workgroup | itself | itself | Acts as the caller only; per-item visibility in `access/items.go` (a coordinator sees its workgroup's items). Console and overseer (the global inbox owner): as itself, every item. See [Items](items.md). |
@@ -121,12 +121,12 @@ The overseer's column is in [Workgroup permissions](workgroup-permissions.md#con
 | `steer` goal | host | no | no | Rejected for every session principal. |
 | `set-archived archived=true` (`amux agent done`) | workgroup | itself | members; its own workgroup (cascades to members) | Coordinators archive their workgroup only after explicit user confirmation. Repo homes never archive themselves. Console: any. Refused while the target (or, for a workgroup, any member) owns an open PR; `force=true` overrides, allowed for the host, the console, and a coordinator on a direct member — never on itself. |
 | `set-archived archived=false`, `archive` toggle | host | no | no | Restore needs host regrant. |
-| `add-agent` | workgroup | no | its own workgroup, granted repos only | Console: any. An ungranted repo is denied `repo_not_granted` with a message naming it and `amux workgroup grants`. |
+| `add-agent` | workgroup | no | its own workgroup, granted repos only | Console: any. An ungranted repo is denied `repo_not_granted` with a message naming it and `amux repo grant`. |
 | `delete`, `kill`, `move`, `agent-set-repos` | host | no | no | Console. `delete`/`kill` refuse while an open PR remains unless `force=true`. |
 | `new-workgroup`, `create-workspace`, `refresh` | host | no | no | Console; a repo home may create a workgroup limited to its own repo. The overseer: `refresh`, and `new-workgroup -f from_item=<item>` for an item the host acknowledged. |
 | `add-repo`, `rm-repo` | host | no | no | Console. |
-| query `queue` (`amux queue list`) | host | no | no | Read-only for the admin console and the overseer. |
-| `queue-answer`, `queue-dismiss` (`amux queue answer\|dismiss`) | host | no | no | Only the user answers the question queue. |
+| query `queue` (`amux inbox ls`) | host | no | no | Read-only for the admin console and the overseer. |
+| `queue-answer`, `queue-dismiss` (`amux inbox answer\|dismiss`) | host | no | no | Only the user answers the question queue. |
 | `coordinator-set-repos`, `restart`, `auth-reload`, `account-manage`, `codex-login`, `subscribe`, `query` | host | no | no | |
 | `pane.*` | host | no | no | Restricted principals use one-shot mailbox RPC only. |
 | query `runtime-path`, `runtime-record`, `accounts`, `account-manage`, `account-ceremony`, `codex-auth` | host | no | no | Raw host paths and credentials. |
@@ -134,7 +134,7 @@ The overseer's column is in [Workgroup permissions](workgroup-permissions.md#con
 Self reports (`amux agent status|hook|permission|model|capture`), the credential
 broker, and central auth queries are authorized by their own self-only checks
 before this table. Workgroup restore, repo add/rm, auth, config,
-daemon control, and `amux sandbox` remain host commands.
+daemon control, and `amux harness sandbox` remain host commands.
 
 ## Availability, restart, and completion
 

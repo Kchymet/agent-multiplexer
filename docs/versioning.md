@@ -115,7 +115,7 @@ this again, and only then commits. From that moment a prompt to any agent is
 refused with "the daemon is restarting to load an amux update" instead of
 being typed into a process about to stop; the agents come back within seconds.
 
-`amux version`, `amux doctor` (Versions → update) and `amux status` (on stderr)
+`amux version`, `amux doctor` (Versions → update) and `amux ls` (on stderr)
 report a pending update and why it is waiting, naming the agents that hold it
 back (for example `waiting for 1 running agent(s) to be idle between turns
 (a1b2c3: mid-turn or waiting on a permission prompt)`).

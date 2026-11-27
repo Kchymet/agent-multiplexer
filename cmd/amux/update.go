@@ -261,7 +261,7 @@ func applyStagedBeforeStart() {
 }
 
 // printPendingUpdate notes on stderr that an installed or staged release has
-// not been loaded by the daemon yet (used by amux status).
+// not been loaded by the daemon yet (used by amux ls).
 func printPendingUpdate() {
 	r := collectVersionReport()
 	if line, pending := updateStatusLine(r); pending {

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Updating a grant in place (amux direct clients update).
+// Updating a grant in place (amux device ls update).
 //
 // A grant's permissions and resource scope can change without re-enrollment:
 // the client keeps its client id, refresh token and access tokens. Admission

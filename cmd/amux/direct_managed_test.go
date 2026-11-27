@@ -208,7 +208,7 @@ func TestDirectEnableWaitsForReadiness(t *testing.T) {
 	}
 }
 
-// A manual `amux direct serve` that owns the store answers the admin socket
+// A manual `amux device serve` that owns the store answers the admin socket
 // while the freshly spawned child is still alive (about to fail on the lock).
 // That is not the managed listener being ready.
 func TestDirectEnableNotReadyWhenOnlyManualServerAnswers(t *testing.T) {
@@ -239,7 +239,7 @@ func TestDirectEnableIgnoresStaleReadyMarker(t *testing.T) {
 func TestDirectEnableReportsStartFailure(t *testing.T) {
 	c := newDirectCLI(t)
 	c.daemonUp = true
-	c.supervise(directsvc.StateBackoff, "another `amux direct serve` already owns the direct store")
+	c.supervise(directsvc.StateBackoff, "another `amux device serve` already owns the direct store")
 	_, err := captureOutput(t, func() error { return cmdDirectEnable(c.enableArgs()) })
 	if err == nil || !strings.Contains(err.Error(), "already owns the direct store") {
 		t.Fatalf("enable with a failing child = %v", err)
@@ -253,7 +253,7 @@ func TestDirectEnableNoWaitStillEnsuresDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enable --no-wait: %v", err)
 	}
-	if c.ensured != 1 || !strings.Contains(out, "amux direct status") {
+	if c.ensured != 1 || !strings.Contains(out, "amux device status") {
 		t.Fatalf("ensured=%d out=%q", c.ensured, out)
 	}
 }
