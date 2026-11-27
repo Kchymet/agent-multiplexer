@@ -370,7 +370,7 @@ func TestApplyTailnetServeRederivesAtStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	fp := directsvc.Fingerprint(s)
-	run, err := applyTailnetServe(context.Background(), s, &cfg, true, fp, t.Logf)
+	run, err := applyTailnetServe(context.Background(), s, &cfg, true, fp, t.Logf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestApplyTailnetServeRederivesAtStart(t *testing.T) {
 	// Explicit listen survives re-derivation.
 	s.Tailnet.ListenExplicit, s.Listen = true, "127.0.0.1:"+strconv.Itoa(c.port)
 	cfg2, _ := settingsServeConfig(s)
-	if _, err := applyTailnetServe(context.Background(), s, &cfg2, true, fp, t.Logf); err != nil {
+	if _, err := applyTailnetServe(context.Background(), s, &cfg2, true, fp, t.Logf, nil); err != nil {
 		t.Fatal(err)
 	}
 	if cfg2.Listen != s.Listen {
@@ -418,7 +418,7 @@ func TestApplyTailnetServeFailsRatherThanBindStale(t *testing.T) {
 	s := loadSaved(t)
 	c.api.Set("BackendState", "Stopped")
 	cfg, _ := settingsServeConfig(s)
-	if _, err := applyTailnetServe(context.Background(), s, &cfg, true, "", t.Logf); err == nil || !strings.Contains(err.Error(), "stopped") {
+	if _, err := applyTailnetServe(context.Background(), s, &cfg, true, "", t.Logf, nil); err == nil || !strings.Contains(err.Error(), "stopped") {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -434,7 +434,7 @@ func TestApplyTailnetServeDriftReported(t *testing.T) {
 	directDriftInterval = 20 * time.Millisecond
 	t.Cleanup(func() { directDriftInterval = old })
 	cfg, _ := settingsServeConfig(s)
-	run, err := applyTailnetServe(context.Background(), s, &cfg, false, "", t.Logf)
+	run, err := applyTailnetServe(context.Background(), s, &cfg, false, "", t.Logf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,6 +453,47 @@ func TestApplyTailnetServeDriftReported(t *testing.T) {
 	t.Fatal("identity drift not reported in the state")
 }
 
+// The managed child asks to be restarted (so the supervisor re-derives) when
+// the address it derived changes under it: serving the old one would leave
+// every client unable to connect until someone noticed.
+func TestApplyTailnetServeManagedRestartsOnAddressChange(t *testing.T) {
+	c := newTailnetCLI(t)
+	c.existingPair("server", 200*24*time.Hour)
+	if err := cmdDirectEnable(c.portArgs()); err != nil {
+		t.Fatal(err)
+	}
+	s := loadSaved(t)
+	old := directDriftInterval
+	directDriftInterval = 20 * time.Millisecond
+	t.Cleanup(func() { directDriftInterval = old })
+	cfg, _ := settingsServeConfig(s)
+	asked := make(chan string, 4)
+	run, err := applyTailnetServe(context.Background(), s, &cfg, true, directsvc.Fingerprint(s), t.Logf, func(why string) { asked <- why })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	// The same identity re-read is no change.
+	c.api.SetRunning(tnHost+".", "fd7a:115c:a1e0::5", "127.0.0.1")
+	select {
+	case why := <-asked:
+		t.Fatalf("restart without a change: %s", why)
+	case <-time.After(100 * time.Millisecond):
+	}
+	c.api.SetRunning(tnHost+".", "fd7a:115c:a1e0::6", "127.0.0.2")
+	select {
+	case why := <-asked:
+		if !strings.Contains(why, "network_changed") || !strings.Contains(why, "127.0.0.2") {
+			t.Fatalf("reason: %s", why)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("address change did not ask for a restart")
+	}
+}
+
 func TestDirectStatusTailnet(t *testing.T) {
 	c := newTailnetCLI(t)
 	c.existingPair("server", 200*24*time.Hour)
@@ -462,7 +503,7 @@ func TestDirectStatusTailnet(t *testing.T) {
 	s := loadSaved(t)
 	cfg, _ := settingsServeConfig(s)
 	fp := directsvc.Fingerprint(s)
-	if _, err := applyTailnetServe(context.Background(), s, &cfg, true, fp, t.Logf); err != nil {
+	if _, err := applyTailnetServe(context.Background(), s, &cfg, true, fp, t.Logf, nil); err != nil {
 		t.Fatal(err)
 	}
 	os.MkdirAll(filepath.Dir(directsvc.StatusPath()), 0o755)
@@ -565,12 +606,12 @@ func TestApplyTailnetServeExplicitCertMustCoverRederivedEndpoint(t *testing.T) {
 	}
 	s := loadSaved(t)
 	cfg, _ := settingsServeConfig(s)
-	if _, err := applyTailnetServe(context.Background(), s, &cfg, true, "", t.Logf); err != nil {
+	if _, err := applyTailnetServe(context.Background(), s, &cfg, true, "", t.Logf, nil); err != nil {
 		t.Fatalf("private-CA explicit certificate refused: %v", err)
 	}
 	c.api.SetRunning("renamed.example-tailnet.ts.net.", "127.0.0.1")
 	cfg, _ = settingsServeConfig(s)
-	_, err := applyTailnetServe(context.Background(), s, &cfg, true, "", t.Logf)
+	_, err := applyTailnetServe(context.Background(), s, &cfg, true, "", t.Logf, nil)
 	if err == nil || !strings.Contains(err.Error(), "does not cover renamed.example-tailnet.ts.net") || !strings.Contains(err.Error(), "--endpoint") {
 		t.Fatalf("err %v", err)
 	}

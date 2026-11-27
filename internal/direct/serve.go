@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -33,6 +34,9 @@ type ServeConfig struct {
 	ExtraOrigins func() []string
 	// Ready, when set, is called once the listener and admin socket are up.
 	Ready func(addr net.Addr, serverID string)
+	// ListenCheck is how often the listener checks that its address is
+	// still assigned to this host (default 30s; ConnStats.Listen).
+	ListenCheck time.Duration
 }
 
 // Serve runs the direct server until ctx ends. Every check that can refuse the
@@ -44,7 +48,15 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	if err := CheckBind(cfg.Listen, cfg.AllowPublicBind); err != nil {
 		return err
 	}
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	// HTTP/2 is offered first. Over HTTP/1.1 a browser opens at most six
+	// connections per origin, shared by every tab, and each open transcript
+	// stream (SSE) holds one for as long as it is open: with a few sessions
+	// open, every further request — a token refresh, a hello, a history page —
+	// queues behind them indefinitely and the backend looks unreachable.
+	// HTTP/2 carries all of them on one connection. The watch WebSocket stays
+	// HTTP/1.1: the server does not advertise extended CONNECT (RFC 8441), so
+	// clients open it on a connection of its own, as before.
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2", "http/1.1"}}
 	if cfg.GetCertificate != nil {
 		c, err := cfg.GetCertificate(nil)
 		if err != nil || c == nil {
@@ -79,7 +91,8 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	if err != nil {
 		return err
 	}
-	admin := &AdminServer{Authority: a, Endpoints: srv.cfg.Endpoints, Verify: cfg.Verify, Logf: cfg.Logf, Wake: wake, Approvals: approvals}
+	admin := &AdminServer{Authority: a, Endpoints: srv.cfg.Endpoints, Verify: cfg.Verify, Logf: cfg.Logf, Wake: wake, Approvals: approvals,
+		Conns: srv.ConnStats}
 	if err := admin.Listen(cfg.Root); err != nil {
 		return fmt.Errorf("admin socket: %w", err)
 	}
@@ -88,7 +101,11 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		admin.ln.Close()
 		return err
 	}
-	ctx, cancel := context.WithCancel(ctx)
+	// shutdown fires when the caller's ctx ends; the serve context is
+	// cancelled only after the server is marked closing, so streams it ends
+	// report server_closed.
+	shutdown := ctx.Done()
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	tlsLn := tls.NewListener(ln, tlsCfg)
 	hs := &http.Server{
@@ -96,17 +113,32 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    16 << 10,
-		BaseContext:       func(net.Listener) context.Context { return ctx },
+		// The request context is the serve context, so shutting down ends
+		// every stream at once rather than after Shutdown's grace.
+		BaseContext: func(net.Listener) context.Context { return ctx },
+		ConnState:   srv.tel.connState,
+		ErrorLog:    log.New(errorLog{srv.tel}, "", 0),
 	}
 	go wake.Run(ctx)
 	adminErr := make(chan error, 1)
 	go func() { adminErr <- admin.Serve(ctx) }()
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-shutdown:
+		case <-ctx.Done(): // Serve failed on its own
+			return
+		}
+		srv.beginShutdown()
+		cancel()
 		shut, done := context.WithTimeout(context.Background(), 5*time.Second)
 		defer done()
 		_ = hs.Shutdown(shut)
 	}()
+	interval := cfg.ListenCheck
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	go srv.tel.watchListen(ctx, ln.Addr().String(), interval, net.InterfaceAddrs)
 	if cfg.Ready != nil {
 		cfg.Ready(ln.Addr(), a.ServerID())
 	}

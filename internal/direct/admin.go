@@ -155,6 +155,9 @@ type AdminResponse struct {
 	Approval       *ApprovalAdminResponse `json:"approval,omitempty"`
 	// Update is OpUpdate's result.
 	Update *GrantUpdateResult `json:"update,omitempty"`
+	// Connections is the listener's connection telemetry (OpCloudStatus on a
+	// running server; an older server omits it).
+	Connections *ConnStats `json:"connections,omitempty"`
 }
 
 // EncodeBundle renders a paste bundle.
@@ -221,7 +224,10 @@ type AdminServer struct {
 	Wake *WakeService
 	// Approvals serves the approval lease/settle operations; nil refuses them.
 	Approvals *ApprovalQueue
-	ln        net.Listener
+	// Conns, when set, supplies the listener's connection counters for
+	// OpCloudStatus (AdminResponse.Connections).
+	Conns func() ConnStats
+	ln    net.Listener
 }
 
 // AdminSocketPath is the admin socket inside root.
@@ -316,6 +322,10 @@ func (s *AdminServer) handle(parent context.Context, conn net.Conn) {
 		resp = Administer(s.Authority, s.Endpoints, *f.Request)
 		if f.Request.Op == OpCloudStatus && resp.OK {
 			resp.ApprovalServed = s.Approvals != nil
+			if s.Conns != nil {
+				st := s.Conns()
+				resp.Connections = &st
+			}
 		}
 	}
 	_ = enc.Encode(adminFrame{Type: "response", Response: &resp})

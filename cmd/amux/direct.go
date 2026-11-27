@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -59,6 +60,8 @@ func cmdDirectServe(args []string) error {
 	var cfg direct.ServeConfig
 	var managedReady func(net.Addr, string)
 	var tailnetRun func(context.Context)
+	rederive := make(chan string, 1) // the managed tailnet child's restart request
+	var rederived atomic.Value       // its reason, once honored
 	logf := func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
 	if *managed {
 		// The daemon's child: the whole configuration is the saved setting, so
@@ -89,7 +92,15 @@ func cmdDirectServe(args []string) error {
 			// certificate this child will renew and reload in place. The
 			// fingerprint stays the saved configuration's, so readiness still
 			// correlates with what the supervisor started.
-			if tailnetRun, err = applyTailnetServe(ctx, s, &cfg, true, directsvc.Fingerprint(s), logf); err != nil {
+			// A changed tailnet name or address stops this child, so the
+			// supervisor restarts it on the new identity (network_changed).
+			ask := func(why string) {
+				select {
+				case rederive <- why:
+				default:
+				}
+			}
+			if tailnetRun, err = applyTailnetServe(ctx, s, &cfg, true, directsvc.Fingerprint(s), logf, ask); err != nil {
 				return err
 			}
 		}
@@ -98,6 +109,15 @@ func cmdDirectServe(args []string) error {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
+		go func() {
+			select {
+			case why := <-rederive:
+				rederived.Store(why)
+				fmt.Fprintf(os.Stderr, "amux device: %s\n", why)
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
 		go directsvc.WatchParent(supervisor, 2*time.Second, ctx.Done(), func() {
 			fmt.Fprintln(os.Stderr, "amux device: supervising daemon exited; stopping")
 			cancel()
@@ -122,7 +142,7 @@ func cmdDirectServe(args []string) error {
 		if cfg, err = settingsServeConfig(s); err != nil {
 			return err
 		}
-		if tailnetRun, err = applyTailnetServe(ctx, s, &cfg, false, "", logf); err != nil {
+		if tailnetRun, err = applyTailnetServe(ctx, s, &cfg, false, "", logf, nil); err != nil {
 			return err
 		}
 	} else {
@@ -157,6 +177,11 @@ func cmdDirectServe(args []string) error {
 		}
 	}
 	err = direct.Serve(ctx, cfg)
+	if why, _ := rederived.Load().(string); err == nil && why != "" {
+		// Exit non-zero with the reason: the supervisor records it as the
+		// last error and restarts this listener, which re-derives.
+		err = errors.New(why)
+	}
 	if err != nil && !*managed && strings.Contains(err.Error(), "already owns the direct store") {
 		err = fmt.Errorf("%w (if the daemon manages it, see amux device status; amux device disable turns it off)", err)
 	}

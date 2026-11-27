@@ -617,6 +617,12 @@ type CatalogWorkgroup struct {
 type WatchAuth struct {
 	Type        string `json:"type"` // "auth"
 	AccessToken string `json:"access_token"`
+	// Heartbeat (optional) asks the server for a frame at least every
+	// heartbeat interval: a WatchHeartbeat whenever nothing else was sent.
+	// Browsers cannot see WebSocket pings, so this is how a client tells a
+	// quiet inventory from a dead socket. Older servers ignore it (and send
+	// no heartbeat_ms in the welcome).
+	Heartbeat bool `json:"heartbeat,omitempty"`
 }
 
 // WatchWelcome is the server's first frame after authentication.
@@ -624,6 +630,15 @@ type WatchWelcome struct {
 	Type      string `json:"type"` // "welcome"
 	ServerID  string `json:"server_id"`
 	ExpiresAt int64  `json:"expires_at"` // unix seconds: the socket closes 4002 then
+	// Heartbeat is the heartbeat interval in milliseconds, present only
+	// when the client asked for heartbeats and the server sends them.
+	Heartbeat int64 `json:"heartbeat_ms,omitempty"`
+}
+
+// WatchHeartbeat is sent, to a client that asked for it, whenever the watch
+// has sent nothing else for the heartbeat interval.
+type WatchHeartbeat struct {
+	Type string `json:"type"` // "heartbeat"
 }
 
 // WatchSnapshot carries the full filtered inventory whenever it changes.

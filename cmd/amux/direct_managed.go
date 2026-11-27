@@ -390,6 +390,9 @@ type directServerStatus struct {
 	Endpoints []string               `json:"endpoints"`
 	Cloud     *direct.CloudStatus    `json:"cloud,omitempty"`
 	Enroll    *direct.EnrollActivity `json:"enroll,omitempty"`
+	// Connections is the listener's connection telemetry since it started
+	// (docs/direct-access.md, "Connection diagnostics").
+	Connections *direct.ConnStats `json:"connections,omitempty"`
 }
 
 // directProviderView separates what the provider actually advertised (its
@@ -461,7 +464,7 @@ func probeDirectServer() *directServerStatus {
 	if err != nil || resp.ServerID == "" {
 		return nil
 	}
-	return &directServerStatus{ServerID: resp.ServerID, Endpoints: resp.Endpoints, Cloud: resp.Cloud, Enroll: resp.Enroll}
+	return &directServerStatus{ServerID: resp.ServerID, Endpoints: resp.Endpoints, Cloud: resp.Cloud, Enroll: resp.Enroll, Connections: resp.Connections}
 }
 
 // directProviderCoherence compares the offer the provider registered with
@@ -538,6 +541,7 @@ func printDirectStatus(r directStatusReport) {
 			fmt.Print("          ")
 			printCloudStatus(*r.Server.Cloud)
 		}
+		printDirectConnections(r.Server.Connections)
 	}
 	printTailnetView(r.Tailnet)
 	mark := "·"
