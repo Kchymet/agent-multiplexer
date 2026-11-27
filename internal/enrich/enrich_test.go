@@ -267,6 +267,46 @@ func TestRollupCountsAndStaleness(t *testing.T) {
 	}
 }
 
+// The rollup lists its members' open PRs, most demanding first, so a
+// workgroup row links each one directly; merged and closed PRs are left out.
+func TestRollupOpenPullRequests(t *testing.T) {
+	ready := hp.StateReady
+	members := []Member{
+		mem("a", ready, open(1, approved), open(2, mergedAgo(time.Hour))),
+		mem("b", ready, open(3, red), open(4, closed), open(5, draft)),
+	}
+	r := Rollup(Input{OwnState: ready, Members: members, Sources: []SourceStatus{prSource}})
+	got := r.Rollup.PullRequests
+	var nums []int
+	for _, pr := range got {
+		nums = append(nums, pr.Number)
+	}
+	if len(nums) != 3 || nums[0] != 3 || nums[1] != 5 || nums[2] != 1 {
+		t.Fatalf("open PR order = %v, want [3 5 1] (attention, attention draft, awaiting merge)", nums)
+	}
+	want := hp.RollupPullRequest{SessionID: "b", Member: "b", ID: "o/r#3", Repo: "o/r", Number: 3,
+		URL: "https://github.com/o/r/pull/1", State: hp.PRStateOpen, Status: hp.StatusAttention, CI: hp.CIRed, Label: got[0].Label}
+	if got[0] != want || got[0].Label == "" {
+		t.Fatalf("entry = %+v, want %+v", got[0], want)
+	}
+	b, _ := json.Marshal(r.Rollup)
+	if !strings.Contains(string(b), `"pull_requests":[{"session_id":"b","member":"b","id":"o/r#3","repo":"o/r","number":3,`) {
+		t.Fatalf("rollup JSON = %s", b)
+	}
+
+	// Nothing open, or PR watching off: the key is absent.
+	for _, in := range []Input{
+		{OwnState: ready, Members: []Member{mem("a", ready, open(1, mergedAgo(time.Hour)))}, Sources: []SourceStatus{prSource}},
+		{OwnState: ready, Members: members},
+	} {
+		r := Rollup(in)
+		b, _ := json.Marshal(r.Rollup)
+		if r.Rollup.PullRequests != nil || strings.Contains(string(b), "pull_requests") {
+			t.Fatalf("rollup with no open PRs = %s", b)
+		}
+	}
+}
+
 func TestNormalizeUnknownRollupState(t *testing.T) {
 	for in, want := range map[string]string{
 		"waiting_merge": "waiting_merge", "pr_attention": "pr_attention", "": "ready", "waiting_deploy": "ready",
